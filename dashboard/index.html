@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>BTC Short Straddle — Demo</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <p class="eyebrow">NAUTILUSTRADER · BYBIT DEMO</p>
+      <h1>BTC Short Straddle</h1>
+    </div>
+    <div class="connection-wrap">
+      <span id="connection-indicator" class="indicator indicator-off"></span>
+      <span id="connection-label">Disconnected</span>
+      <span class="environment-tag">Demo only</span>
+    </div>
+  </header>
+
+  <main>
+    <p id="notice" class="notice" role="status">Waiting for application state.</p>
+
+    <section aria-labelledby="overview-heading">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">LIVE EXCHANGE STATE</p>
+          <h2 id="overview-heading">Overview</h2>
+        </div>
+        <span id="strategy-status" class="status-badge status-inactive">DISCONNECTED</span>
+      </div>
+      <div class="metric-grid">
+        <article class="metric-card">
+          <span class="metric-label">BTC reference price</span>
+          <strong id="btc-price" class="metric-value">—</strong>
+          <span id="btc-updated" class="metric-footnote">No exchange update</span>
+        </article>
+        <article class="metric-card">
+          <span class="metric-label">Selected ATM strike</span>
+          <strong id="atm-strike" class="metric-value">—</strong>
+          <span id="selected-expiry" class="metric-footnote">No contracts selected</span>
+        </article>
+        <article class="metric-card">
+          <span class="metric-label">Combined entry premium</span>
+          <strong id="entry-premium" class="metric-value">—</strong>
+          <span id="entry-currency" class="metric-footnote">Actual filled quantities</span>
+        </article>
+        <article class="metric-card">
+          <span class="metric-label">Current buyback value</span>
+          <strong id="buyback-value" class="metric-value">—</strong>
+          <span class="metric-footnote">Based on current asks</span>
+        </article>
+      </div>
+      <div class="summary-row">
+        <div><span class="summary-label">Call order</span><span id="call-order-status" class="status-badge status-inactive">—</span></div>
+        <div><span class="summary-label">Put order</span><span id="put-order-status" class="status-badge status-inactive">—</span></div>
+        <div><span class="summary-label">Unrealized P&amp;L</span><strong id="unrealized-pnl">—</strong></div>
+        <div><span class="summary-label">Stop-loss</span><span id="stop-status" class="status-badge status-inactive">—</span></div>
+        <div><span class="summary-label">Take-profit</span><span id="take-status" class="status-badge status-inactive">—</span></div>
+      </div>
+    </section>
+
+    <section aria-labelledby="positions-heading">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">EXCHANGE-FILLED EXPOSURE</p>
+          <h2 id="positions-heading">Positions</h2>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Option</th><th>Instrument</th><th>Strike</th><th>Expiry</th>
+              <th>Requested</th><th>Filled</th><th>Remaining</th><th>Entry premium</th>
+              <th>Bid</th><th>Ask</th><th>Buyback value</th><th>Unrealized P&amp;L</th><th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="positions-table"><tr><td colspan="13" class="empty-state">No position data received.</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section aria-labelledby="pnl-heading">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">ACTUAL FILL-BASED TOTALS</p>
+          <h2 id="pnl-heading">Profit and loss</h2>
+        </div>
+      </div>
+      <div class="pnl-grid">
+        <div><span>Combined entry premium</span><strong id="pnl-entry">—</strong></div>
+        <div><span>Current combined buyback</span><strong id="pnl-buyback">—</strong></div>
+        <div><span>Unrealized P&amp;L</span><strong id="pnl-unrealized">—</strong></div>
+        <div><span>Realized P&amp;L</span><strong id="pnl-realized">—</strong></div>
+        <div><span>Exit reason</span><strong id="exit-reason">—</strong></div>
+      </div>
+      <p class="disclaimer">Short options can incur substantial losses. This application is restricted to Bybit Demo and is for technical demonstration only.</p>
+    </section>
+
+    <section aria-labelledby="orders-heading">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">ENTRY AND EXIT ACTIVITY</p>
+          <h2 id="orders-heading">Trade history</h2>
+        </div>
+      </div>
+      <h3>Executions</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Timestamp</th><th>Instrument</th><th>Side</th><th>Order type</th>
+              <th>Fill quantity</th><th>Fill price</th><th>Status</th><th>Exchange order ID</th>
+            </tr>
+          </thead>
+          <tbody id="trades-table"><tr><td colspan="8" class="empty-state">No execution data received.</td></tr></tbody>
+        </table>
+      </div>
+      <h3 class="subheading">Orders</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Timestamp</th><th>Instrument</th><th>Side</th><th>Order type</th>
+              <th>Requested</th><th>Filled</th><th>Average fill</th><th>Status</th><th>Exchange order ID</th>
+            </tr>
+          </thead>
+          <tbody id="orders-table"><tr><td colspan="9" class="empty-state">No order activity received.</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section aria-labelledby="config-heading">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">READ-ONLY SETTINGS</p>
+          <h2 id="config-heading">Configuration</h2>
+        </div>
+      </div>
+      <dl class="config-grid">
+        <div><dt>Environment</dt><dd id="config-environment">Demo</dd></div>
+        <div><dt>Strategy enabled</dt><dd id="config-enabled">—</dd></div>
+        <div><dt>Requested quantity per leg</dt><dd id="config-quantity">—</dd></div>
+        <div><dt>Stop-loss</dt><dd id="config-stop">—</dd></div>
+        <div><dt>Take-profit</dt><dd id="config-take">—</dd></div>
+      </dl>
+    </section>
+  </main>
+
+  <footer>
+    <span>Dashboard values are supplied by the NautilusTrader engine.</span>
+    <span id="last-refresh">Not refreshed</span>
+  </footer>
+  <script src="/static/script.js" defer></script>
+</body>
+</html>

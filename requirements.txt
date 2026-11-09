@@ -1,0 +1,4 @@
+nautilus_trader==1.231.0
+fastapi
+uvicorn[standard]
+python-dotenv
