@@ -56,3 +56,25 @@ def select_btc_atm_pair(
         ),
     )
     return legs[OptionKind.CALL], legs[OptionKind.PUT]
+
+
+def select_btc_pair(
+    instruments: Iterable[object],
+    expiry_ns: int,
+    strike: Decimal,
+    now_ns: int,
+) -> tuple[CryptoOption, CryptoOption] | None:
+    pair = select_btc_atm_pair(
+        (
+            instrument
+            for instrument in instruments
+            if isinstance(instrument, CryptoOption)
+            and instrument.expiration_ns == expiry_ns
+            and Decimal(str(instrument.strike_price)) == strike
+        ),
+        strike,
+        now_ns,
+    )
+    if pair is None or pair[0].expiration_ns != expiry_ns:
+        return None
+    return pair

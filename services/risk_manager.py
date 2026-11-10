@@ -13,9 +13,12 @@ class LegExposure:
     exit_notional: Decimal
     multiplier: Decimal
     ask_price: Decimal | None
+    actual_quantity: Decimal | None = None
 
     @property
     def remaining_quantity(self) -> Decimal:
+        if self.actual_quantity is not None:
+            return self.actual_quantity
         return max(Decimal(0), self.filled_quantity - self.exited_quantity)
 
     @property

@@ -15,7 +15,7 @@
     </div>
     <div class="connection-wrap">
       <span id="connection-indicator" class="indicator indicator-off"></span>
-      <span id="connection-label">Disconnected</span>
+      <span id="connection-label">Trading engine inactive</span>
       <span class="environment-tag">Demo only</span>
     </div>
   </header>
@@ -35,12 +35,12 @@
         <article class="metric-card">
           <span class="metric-label">BTC reference price</span>
           <strong id="btc-price" class="metric-value">—</strong>
-          <span id="btc-updated" class="metric-footnote">No exchange update</span>
+          <span id="btc-updated" class="metric-footnote date-display">No exchange update</span>
         </article>
         <article class="metric-card">
           <span class="metric-label">Selected ATM strike</span>
           <strong id="atm-strike" class="metric-value">—</strong>
-          <span id="selected-expiry" class="metric-footnote">No contracts selected</span>
+          <span id="selected-expiry" class="metric-footnote date-display">No contracts selected</span>
         </article>
         <article class="metric-card">
           <span class="metric-label">Combined entry premium</span>
@@ -62,11 +62,79 @@
       </div>
     </section>
 
+    <section aria-labelledby="market-watch-heading">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">LIVE BYBIT OPTION DATA</p>
+          <h2 id="market-watch-heading">Interactive Live Market Watch</h2>
+        </div>
+        <span id="market-data-status" class="status-badge status-inactive">BTC DATA WAITING</span>
+      </div>
+      <div class="form-grid">
+        <label>Expiry
+          <select id="contract-expiry" class="date-display" disabled></select>
+        </label>
+        <label>Strike
+          <select id="contract-strike" disabled></select>
+        </label>
+        <button id="auto-atm" class="button-secondary" type="button" disabled>Auto ATM</button>
+      </div>
+      <div class="market-grid">
+        <article class="metric-card"><span class="metric-label">BTC reference</span><strong id="watch-btc-price" class="metric-value">—</strong><span id="watch-btc-time" class="metric-footnote date-display">No exchange update</span></article>
+        <article class="metric-card"><span class="metric-label">Call contract</span><strong id="watch-call-symbol" class="metric-value">—</strong><span id="watch-call-quote" class="metric-footnote">Bid — / Ask —</span></article>
+        <article class="metric-card"><span class="metric-label">Put contract</span><strong id="watch-put-symbol" class="metric-value">—</strong><span id="watch-put-quote" class="metric-footnote">Bid — / Ask —</span></article>
+        <article class="metric-card"><span class="metric-label">Selected expiry / strike</span><strong id="watch-selection" class="metric-value">—</strong><span id="watch-update-time" class="metric-footnote date-display">No option quote update</span></article>
+      </div>
+    </section>
+
+    <section aria-labelledby="trading-heading">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">MANUAL ORDERS · DEMO ONLY</p>
+          <h2 id="trading-heading">Manual Trading Controls</h2>
+        </div>
+        <span class="environment-tag">Confirmation required</span>
+      </div>
+      <div class="form-grid trading-form">
+        <label>Contract
+          <select id="trade-contract">
+            <option value="CALL">Call</option>
+            <option value="PUT">Put</option>
+            <option value="BOTH">Both (Short Straddle)</option>
+          </select>
+        </label>
+        <label>Quantity
+          <input id="trade-quantity" type="number" min="0" step="any" value="1">
+        </label>
+        <label>Order type
+          <select id="trade-order-type">
+            <option value="MARKET">Market</option>
+            <option value="LIMIT">Limit (IOC)</option>
+          </select>
+        </label>
+        <label id="call-price-field" hidden>Call limit price
+          <input id="call-limit-price" type="number" min="0" step="any">
+        </label>
+        <label id="put-price-field" hidden>Put limit price
+          <input id="put-limit-price" type="number" min="0" step="any">
+        </label>
+      </div>
+      <div class="button-row">
+        <button class="button-primary trade-action" data-action="SELL_CALL" type="button" disabled>Sell Call</button>
+        <button class="button-primary trade-action" data-action="SELL_PUT" type="button" disabled>Sell Put</button>
+        <button class="button-primary trade-action" data-action="SELL_BOTH" type="button" disabled>Sell Both</button>
+        <button class="button-secondary trade-action" data-action="CLOSE_CALL" type="button" disabled>Close Call</button>
+        <button class="button-secondary trade-action" data-action="CLOSE_PUT" type="button" disabled>Close Put</button>
+        <button class="button-secondary trade-action" data-action="CLOSE_BOTH" type="button" disabled>Close Both</button>
+      </div>
+      <p id="trade-message" class="form-message" role="status">Manual orders require fresh quotes. NOT_TRADING blocks orders; UNKNOWN means the adapter has not reported a status change.</p>
+    </section>
+
     <section aria-labelledby="positions-heading">
       <div class="section-heading">
         <div>
           <p class="eyebrow">EXCHANGE-FILLED EXPOSURE</p>
-          <h2 id="positions-heading">Positions</h2>
+          <h2 id="positions-heading">Open Positions</h2>
         </div>
       </div>
       <div class="table-wrap">
@@ -75,10 +143,10 @@
             <tr>
               <th>Option</th><th>Instrument</th><th>Strike</th><th>Expiry</th>
               <th>Requested</th><th>Filled</th><th>Remaining</th><th>Entry premium</th>
-              <th>Bid</th><th>Ask</th><th>Buyback value</th><th>Unrealized P&amp;L</th><th>Status</th>
+              <th>Bid</th><th>Ask</th><th>Buyback value</th><th>Unrealized P&amp;L</th><th>Status</th><th>Action</th>
             </tr>
           </thead>
-          <tbody id="positions-table"><tr><td colspan="13" class="empty-state">No position data received.</td></tr></tbody>
+          <tbody id="positions-table"><tr><td colspan="14" class="empty-state">No position data received.</td></tr></tbody>
         </table>
       </div>
     </section>
@@ -87,11 +155,15 @@
       <div class="section-heading">
         <div>
           <p class="eyebrow">ACTUAL FILL-BASED TOTALS</p>
-          <h2 id="pnl-heading">Profit and loss</h2>
+          <h2 id="pnl-heading">Risk Management</h2>
         </div>
       </div>
       <div class="pnl-grid">
+        <div><span>Call entry premium</span><strong id="pnl-call-entry">—</strong></div>
+        <div><span>Put entry premium</span><strong id="pnl-put-entry">—</strong></div>
         <div><span>Combined entry premium</span><strong id="pnl-entry">—</strong></div>
+        <div><span>Call buyback value</span><strong id="pnl-call-buyback">—</strong></div>
+        <div><span>Put buyback value</span><strong id="pnl-put-buyback">—</strong></div>
         <div><span>Current combined buyback</span><strong id="pnl-buyback">—</strong></div>
         <div><span>Unrealized P&amp;L</span><strong id="pnl-unrealized">—</strong></div>
         <div><span>Realized P&amp;L</span><strong id="pnl-realized">—</strong></div>
@@ -103,8 +175,8 @@
     <section aria-labelledby="orders-heading">
       <div class="section-heading">
         <div>
-          <p class="eyebrow">ENTRY AND EXIT ACTIVITY</p>
-          <h2 id="orders-heading">Trade history</h2>
+          <p class="eyebrow">ACTUAL NAUTILUSTRADER ORDER EVENTS</p>
+          <h2 id="orders-heading">Order History</h2>
         </div>
       </div>
       <h3>Executions</h3>
@@ -112,11 +184,11 @@
         <table>
           <thead>
             <tr>
-              <th>Timestamp</th><th>Instrument</th><th>Side</th><th>Order type</th>
+              <th>Order ID</th><th>Timestamp</th><th>Instrument</th><th>Side</th><th>Order type</th>
               <th>Fill quantity</th><th>Fill price</th><th>Status</th><th>Exchange order ID</th>
             </tr>
           </thead>
-          <tbody id="trades-table"><tr><td colspan="8" class="empty-state">No execution data received.</td></tr></tbody>
+          <tbody id="trades-table"><tr><td colspan="9" class="empty-state">No execution data received.</td></tr></tbody>
         </table>
       </div>
       <h3 class="subheading">Orders</h3>
@@ -124,11 +196,11 @@
         <table>
           <thead>
             <tr>
-              <th>Timestamp</th><th>Instrument</th><th>Side</th><th>Order type</th>
+              <th>Order ID</th><th>Updated</th><th>Instrument</th><th>Side</th><th>Order type</th>
               <th>Requested</th><th>Filled</th><th>Average fill</th><th>Status</th><th>Exchange order ID</th>
             </tr>
           </thead>
-          <tbody id="orders-table"><tr><td colspan="9" class="empty-state">No order activity received.</td></tr></tbody>
+          <tbody id="orders-table"><tr><td colspan="10" class="empty-state">No order activity received.</td></tr></tbody>
         </table>
       </div>
     </section>

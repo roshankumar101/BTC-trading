@@ -74,25 +74,47 @@ th { color: var(--muted); background: var(--surface-soft); font-size: .72rem; fo
 tbody tr:last-child td { border-bottom: 0; }
 .empty-state { padding: 22px 12px; color: var(--muted); text-align: center; }
 
-.pnl-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; }
+.pnl-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
 .pnl-grid > div, .config-grid > div { display: flex; flex-direction: column; gap: 5px; padding: 12px; border: 1px solid var(--border); border-radius: 5px; }
 .pnl-grid span, dt { color: var(--muted); font-size: .78rem; }
 .pnl-grid strong, dd { font-weight: 650; overflow-wrap: anywhere; }
 .disclaimer { margin-top: 14px; color: var(--muted); font-size: .78rem; }
 .config-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin: 0; }
 dd { margin: 0; }
+.form-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: end; gap: 12px; margin-bottom: 16px; }
+.trading-form { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+label { display: flex; flex-direction: column; gap: 5px; color: var(--muted); font-size: .78rem; font-weight: 600; }
+[hidden] { display: none !important; }
+input, select, button { min-height: 38px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); color: var(--ink); font: inherit; }
+input, select { width: 100%; padding: 7px 9px; }
+select.date-display { font-size: .9rem; }
+.date-display { font-size: .76rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+.metric-footnote.date-display { font-size: .72rem; }
+.metric-value .date-display { font-size: 1.15rem; }
+.data-stale { color: var(--amber); }
+.data-stale-view > section { opacity: .58; }
+button { padding: 7px 12px; cursor: pointer; font-size: .82rem; font-weight: 650; }
+button:disabled { cursor: not-allowed; opacity: .5; }
+.button-primary { border-color: var(--blue); background: var(--blue); color: white; }
+.button-secondary { border-color: #c8d7e6; color: var(--blue); }
+.button-row { display: flex; flex-wrap: wrap; gap: 9px; }
+.form-message { margin-top: 12px; color: var(--muted); font-size: .82rem; }
+.form-message-error { color: var(--red); }
+.market-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.position-close { min-height: 30px; padding: 4px 8px; }
 
 footer { display: flex; justify-content: space-between; gap: 16px; padding: 16px clamp(18px, 4vw, 56px); border-top: 1px solid var(--border); color: var(--muted); font-size: .75rem; }
 
 @media (max-width: 900px) {
   .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .pnl-grid, .config-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .pnl-grid, .config-grid, .market-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .trading-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   section { padding: 17px; }
 }
 
 @media (max-width: 520px) {
   .topbar { align-items: flex-start; flex-direction: column; }
-  .metric-grid, .pnl-grid, .config-grid { grid-template-columns: 1fr; }
+  .metric-grid, .pnl-grid, .config-grid, .market-grid, .form-grid { grid-template-columns: 1fr; }
   .summary-row { align-items: flex-start; flex-direction: column; gap: 9px; }
   footer { flex-direction: column; }
   h1 { font-size: 1.28rem; }
