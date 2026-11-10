@@ -2,7 +2,7 @@
 
 ## Current status
 
-The original Bybit Demo connection and dashboard were reused. New interactive selection, manual-order, risk-display, and order-history features are implemented. Static review is complete; runtime and manual trading checks remain unverified. No order was submitted for this upgrade.
+The existing Bybit Demo connection and dashboard were preserved. The core functionality audit and approved safety fixes are implemented and covered by safe mocked checks. Live connection, exchange status, reconciliation, and order behavior remain unverified; the application was not started and no order was submitted.
 
 ## Phase status
 
@@ -11,13 +11,15 @@ The original Bybit Demo connection and dashboard were reused. New interactive se
 | 0. Environment and architecture | Complete | Existing Python 3.13 `.venv` retained; stable NautilusTrader 1.231.0 and Windows wheel compatibility confirmed. |
 | 1. Bybit Demo connection and market data | Implemented; runtime unverified | Official Bybit adapter is configured for Demo BTC options; market data subscribes to option quotes and index prices. |
 | 2. Instrument selection | Implemented; runtime unverified | Original ATM selector retained; expiry/strike selection and Auto ATM use loaded BTC option instruments, with data subscribed only for the selected pair. |
-| 3. Level 1 strategy | Implemented; runtime unverified | Automatic Demo IOC entries remain disabled by default; local manual Market/Limit IOC orders route through the existing NautilusTrader strategy. |
+| 3. Level 1 strategy | Issue fixed; Demo unverified | One `Open Short Straddle` action independently tracks both legs; `OPEN` requires both requested fill quantities. Incomplete fills are `PARTIALLY_OPEN` with no automatic recovery submission. |
 | 4. Combined risk management | Implemented; runtime unverified | Ask-side buyback, actual position quantities, multipliers, 1% SL / 2% TP, and a guard against overlapping manual/automatic exits. |
 | 5. Restart reconciliation | Implemented; runtime unverified | Nautilus execution reconciliation enabled; exact matching pair can resume, ambiguous startup state fails closed. |
-| 6. FastAPI backend | Implemented; runtime unverified | Read-only state routes plus loopback-only command routes enqueue work to the engine thread. |
-| 7. Dashboard | Implemented; runtime unverified | Responsive HTML/CSS/JavaScript UI includes Live Market Watch, manual controls, open positions, risk, and order history. |
+| 6. FastAPI backend | Issue fixed; runtime unverified | Health and order readiness distinguish NautilusTrader data and execution connection states; uncertain submissions are returned as errors. |
+| 7. Dashboard | Issue fixed; runtime unverified | One Open Short Straddle entry control; retained explicit close controls and separate data/execution connection indicators. |
 | 8. Documentation | Complete | README, limitations, and manual handoff included. |
-| 9. Static review | Complete | Python AST parsing and safe imports, JavaScript syntax check, dependency consistency, secret-file ignore checks, and diff whitespace check passed; Pylance tooling was unavailable. No runtime or order was started. |
+| 9. Static review | Complete | Python compilation, 11 mocked safety tests, JavaScript syntax, dependency consistency, and diff checks passed; Pylance tooling was unavailable. No runtime or order was started. |
+| 10. Call/Put card UI refinement | Complete; statically verified | Reduced only the Call/Put symbol and quote text sizes in scoped CSS; these cards do not render expiry dates, so no date formatting was changed. `node --check` and `git diff --check` passed. |
+| 11. Core functionality audit | Fixes implemented; Demo unverified | Added full-fill gating, no-silent-recovery behavior, confirmed tradability gating, order outcome reporting, and separate connection-state monitoring. |
 
 ## Completed features
 
@@ -29,17 +31,27 @@ The original Bybit Demo connection and dashboard were reused. New interactive se
 - Order acknowledgement, rejection, cancellation, expiry, and fill callbacks update dashboard state.
 - Exchange position events update displayed quantities; unexpected non-short positions fail closed.
 - Dashboard trading commands are processed on the existing NautilusTrader strategy thread, not by a second exchange connection.
-- Manual orders require local requests, Demo credentials, fresh BTC/option data, valid quantity/price increments, and no existing BTC option orders.
-- `Sell Both` requires matching expiry/strike/currency contracts and attempts recovery if actual fills are unbalanced.
+- The single `Open Short Straddle` entry requires local requests, Demo credentials, fresh BTC/option data, valid quantity/price increments, a matching BTC Call/Put pair, both legs confirmed `TRADING`, and no open orders or positions.
+- Call and Put orders are tracked independently. Only full requested fills on both legs produce `OPEN`; zero fills produce `ENTRY_FAILED`, and underfilled or asymmetric exposure is reported as `PARTIALLY_OPEN` without automatic recovery orders.
 - Manual closes use actual remaining short position quantities and reduce-only buys.
-- Explicit non-trading instrument status blocks manual orders; if no status event is available, a fresh quote and unexpired loaded instrument are still required.
+- Unknown or non-trading instrument status blocks new entries. The dashboard does not enable entry unless both selected legs are confirmed `TRADING`.
+- Execution-client and market-data-client connection states are sampled separately; API order readiness requires both plus fresh BTC reference data.
+- Uncertain order submissions return an explicit API error and pause further trading for reconciliation instead of returning a success-shaped response.
 - Startup with unresolved BTC option positions or open orders fails closed.
 - Exit orders use actual outstanding quantity and are guarded against duplicate active orders.
+- Duplicate commands are blocked by both UI pending state and outstanding local/exchange order tracking.
+- Re-entry after a fully closed position resets the existing leg state in place while preserving the selected instrument and live quote.
 - Risk state and execution history are published through a lock-protected runtime state object.
 - Untracked BTC option positions observed after startup now halt trading for reconciliation instead of being silently ignored.
 - Dashboard refresh uses one atomic snapshot request; engine activity is distinguished from fresh BTC reference data, and stale BTC prices are withheld.
-- Order history is bounded to the most recent 500 records, matching the existing execution-history retention.
+- Order history is bounded to the most recent 500 records, matching the existing execution-history retention; order creation timestamps remain stable across status updates.
 - Date-only and timestamp displays use slightly smaller, consistent typography.
+- Call/Put contract symbols and quote-status lines have a scoped, slight font-size reduction; card structure and dimensions are unchanged.
+
+## Code-verified versus manual verification
+
+- **Code/static verified:** existing paths were audited; 11 safe mocked tests cover API action validation, full/underfilled/asymmetric entry outcomes, uncertain-command failures, tradability gating, connection-state distinction, re-entry reset, and order timestamps. Python compilation, JavaScript syntax, `pip check`, and `git diff --check` passed. No startup or exchange action was performed.
+- **Requires manual Bybit Demo verification:** connectivity and reconnect behavior, initial instrument-status availability, fresh quotes, contract discovery, exchange reconciliation, order acknowledgements/fills/rejections/cancellations, close controls, and risk exits. No application session or exchange activity was used for these fixes.
 
 ## Verified technical decisions
 
@@ -57,13 +69,15 @@ The original Bybit Demo connection and dashboard were reused. New interactive se
 - Windows 11 is not listed in NautilusTrader's official supported Windows OS table (Windows Server 2022+ is listed).
 - Actual availability, permissions, and liquidity of BTC options in the user's Bybit Demo account have not been checked for this upgrade.
 - The last observed Bybit Demo execution startup reported error 10010 (API key IP allowlist mismatch); verify execution connectivity after restarting with the updated Demo key/IP allowlist.
+- The installed Bybit adapter seeds an internal status cache but emits status events only when a later poll detects a change. Until a trustworthy `TRADING` status is exposed for each option, entries intentionally remain disabled; investigate adapter-supported initial status publication before Demo testing.
 - No order or simulated trade has been performed for the incremental features.
 
 ## Important implementation decisions
 
 - No live trading mode or automatic environment switching is provided.
 - `STRATEGY_ENABLED=false` is the default and blocks new entries; software risk management remains active for reconciled open positions.
-- Automatic entries remain disabled by default. Manual controls use IOC Market or Limit orders, and limit prices must match contract ticks.
+- Automatic entries remain disabled by default. Manual entry is one IOC Market or Limit Short Straddle action; limit prices must match contract ticks. Separate Call/Put/Both close controls remain.
+- Incomplete entry fills are visible partial exposure, not a fully opened straddle; recovery is manual and explicitly confirmed.
 - Combined risk uses confirmed remaining short quantities, average actual entry fills, quote currency, and contract multipliers.
 - Stop loss triggers at combined buyback >= remaining entry basis x 1.01; take profit triggers at <= remaining entry basis x 0.98.
 - Manual and automatic exits are guarded against overlap; risk evaluation pauses during a manual close batch and resumes when it completes.
@@ -92,6 +106,8 @@ services/
 strategy/
   __init__.py
   straddle.py
+tests/
+  test_straddle_safety.py
 main.py
 .env.example
 .gitignore
@@ -102,4 +118,4 @@ PROJECT_TRACKER.md
 
 ## Manual testing handoff
 
-Static Python AST parsing and safe imports, JavaScript syntax checks, dependency consistency, secret-file ignore checks, and diff whitespace checks passed. Pylance diagnostics were unavailable in this session. No tests, simulations, application startup, exchange connection, or orders were run for this incremental upgrade. Keep `STRATEGY_ENABLED=false`, restart only after deliberately stopping any older process, verify Demo execution connectivity and absence of unexpected open positions/orders, then inspect live quotes/status before manually testing the controls.
+**Safe code validation:** `python -m unittest discover -s tests -v` (11 tests), Python compile check, `node --check dashboard/script.js`, `pip check`, and `git diff --check` passed. Pylance diagnostics were unavailable. No application startup, simulated trade, Bybit connection, or exchange order was performed. Keep `STRATEGY_ENABLED=false`; before manually checking trading features, verify Demo execution connectivity, absence of unexpected open positions/orders, fresh quotes, and confirmed `TRADING` status for both options.

@@ -27,9 +27,7 @@ class ContractSelectionRequest(BaseModel):
 
 class ManualOrderRequest(BaseModel):
     action: Literal[
-        "SELL_CALL",
-        "SELL_PUT",
-        "SELL_BOTH",
+        "OPEN_STRADDLE",
         "CLOSE_CALL",
         "CLOSE_PUT",
         "CLOSE_BOTH",
@@ -79,14 +77,11 @@ def create_app(
         return {
             "status": "connected" if healthy else "disconnected_or_stale",
             "engine_active": snapshot["connected"],
+            "data_connected": snapshot["data_connected"],
+            "execution_connected": snapshot["execution_connected"],
             "market_data_fresh": market_fresh,
-            "message": (
-                snapshot["connection_message"]
-                if snapshot["connected"] and market_fresh
-                else "Trading engine is inactive"
-                if not snapshot["connected"]
-                else "BTC market data is unavailable or stale"
-            ),
+            "message": _connection_message(snapshot, market_fresh),
+            "strategy_message": snapshot["strategy_message"],
             "engine_error": snapshot["engine_error"],
         }
 
@@ -98,12 +93,11 @@ def create_app(
             "status": snapshot["strategy_status"],
             "connected": snapshot["connected"] and market_fresh,
             "engine_active": snapshot["connected"],
+            "data_connected": snapshot["data_connected"],
+            "execution_connected": snapshot["execution_connected"],
             "market_data_fresh": market_fresh,
-            "message": (
-                snapshot["connection_message"]
-                if market_fresh
-                else "BTC market data is unavailable or stale; new orders are paused"
-            ),
+            "message": _connection_message(snapshot, market_fresh),
+            "strategy_message": snapshot["strategy_message"],
             "error": snapshot["engine_error"],
         }
 
@@ -189,12 +183,11 @@ def create_app(
                 "status": snapshot["strategy_status"],
                 "connected": snapshot["connected"] and market_fresh,
                 "engine_active": snapshot["connected"],
+                "data_connected": snapshot["data_connected"],
+                "execution_connected": snapshot["execution_connected"],
                 "market_data_fresh": market_fresh,
-                "message": (
-                    snapshot["connection_message"]
-                    if market_fresh
-                    else "BTC market data is unavailable or stale; new orders are paused"
-                ),
+                "message": _connection_message(snapshot, market_fresh),
+                "strategy_message": snapshot["strategy_message"],
                 "error": snapshot["engine_error"],
             },
             "market": {
@@ -230,16 +223,17 @@ def create_app(
     ) -> dict:
         _require_local_request(request)
         _require_engine_ready(settings, state)
-        is_entry = body.action.startswith("SELL_")
+        is_entry = body.action == "OPEN_STRADDLE"
         if is_entry and body.quantity is None:
             raise HTTPException(status_code=422, detail="Quantity is required to open a position")
         if body.order_type == "LIMIT":
-            required_prices = (
-                ("CALL", "PUT")
-                if body.action.endswith("BOTH")
-                else (("CALL",) if body.action.endswith("CALL") else ("PUT",))
-            )
-            if not is_entry:
+            if body.action in {"OPEN_STRADDLE", "CLOSE_BOTH"}:
+                required_prices = ("CALL", "PUT")
+            elif body.action == "CLOSE_CALL":
+                required_prices = ("CALL",)
+            else:
+                required_prices = ("PUT",)
+            if body.action == "CLOSE_BOTH":
                 open_kinds = {
                     item["option_type"]
                     for item in state.snapshot()["positions"]
@@ -301,10 +295,17 @@ def _require_engine_ready(settings: Settings, state: RuntimeState) -> None:
     snapshot = state.snapshot()
     if not settings.credentials_configured:
         raise HTTPException(status_code=503, detail="Bybit Demo credentials are not configured")
-    if not snapshot["connected"] or not _market_data_is_fresh(snapshot):
+    if (
+        not snapshot["data_connected"]
+        or not snapshot["execution_connected"]
+        or not _market_data_is_fresh(snapshot)
+    ):
         raise HTTPException(
             status_code=503,
-            detail="Bybit Demo engine and fresh market data are required",
+            detail=(
+                "Bybit Demo data and execution connections plus fresh market data "
+                "are required"
+            ),
         )
 
 
@@ -345,3 +346,11 @@ def _market_data_is_fresh(snapshot: dict) -> bool:
         return False
     age = (datetime.now(timezone.utc) - updated_at).total_seconds()
     return -10 <= age <= 10
+
+
+def _connection_message(snapshot: dict, market_fresh: bool) -> str:
+    if not snapshot["execution_connected"] or not snapshot["data_connected"]:
+        return snapshot["connection_message"]
+    if not market_fresh:
+        return "BTC market data is unavailable or stale; new orders are paused"
+    return snapshot["connection_message"]

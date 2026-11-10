@@ -96,13 +96,6 @@
         <span class="environment-tag">Confirmation required</span>
       </div>
       <div class="form-grid trading-form">
-        <label>Contract
-          <select id="trade-contract">
-            <option value="CALL">Call</option>
-            <option value="PUT">Put</option>
-            <option value="BOTH">Both (Short Straddle)</option>
-          </select>
-        </label>
         <label>Quantity
           <input id="trade-quantity" type="number" min="0" step="any" value="1">
         </label>
@@ -120,14 +113,12 @@
         </label>
       </div>
       <div class="button-row">
-        <button class="button-primary trade-action" data-action="SELL_CALL" type="button" disabled>Sell Call</button>
-        <button class="button-primary trade-action" data-action="SELL_PUT" type="button" disabled>Sell Put</button>
-        <button class="button-primary trade-action" data-action="SELL_BOTH" type="button" disabled>Sell Both</button>
+        <button class="button-primary trade-action" data-action="OPEN_STRADDLE" type="button" disabled>Open Short Straddle</button>
         <button class="button-secondary trade-action" data-action="CLOSE_CALL" type="button" disabled>Close Call</button>
         <button class="button-secondary trade-action" data-action="CLOSE_PUT" type="button" disabled>Close Put</button>
         <button class="button-secondary trade-action" data-action="CLOSE_BOTH" type="button" disabled>Close Both</button>
       </div>
-      <p id="trade-message" class="form-message" role="status">Manual orders require fresh quotes. NOT_TRADING blocks orders; UNKNOWN means the adapter has not reported a status change.</p>
+      <p id="trade-message" class="form-message" role="status">Opening requires fresh quotes and confirmed TRADING status for both legs. Incomplete fills are reported without automatic recovery orders.</p>
     </section>
 
     <section aria-labelledby="positions-heading">

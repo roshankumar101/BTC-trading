@@ -160,48 +160,52 @@ function updateTradingControls() {
   const selected = snapshot?.instruments.selected;
   const connected = Boolean(snapshot?.status.connected);
   const entryReady = connected && !snapshot?.config.strategy_enabled && !commandPending;
-  const contractChoice = $("trade-contract").value;
   const hasOpenCall = snapshot?.positions.items.some(
     (item) => item.option_type === "CALL" && Number(item.remaining_quantity) > 0,
   );
   const hasOpenPut = snapshot?.positions.items.some(
     (item) => item.option_type === "PUT" && Number(item.remaining_quantity) > 0,
   );
+  const hasOpenExposure = hasOpenCall || hasOpenPut;
+  const hasPendingOrder = snapshot?.orders.items.some((item) =>
+    ["SUBMITTED", "ACKNOWLEDGED", "PARTIALLY_FILLED", "SUBMISSION_UNKNOWN"].includes(item.status),
+  );
   for (const button of document.querySelectorAll(".trade-action")) {
     const action = button.dataset.action;
-    const correctChoice = action.endsWith("_BOTH")
-      ? contractChoice === "BOTH"
-      : action.endsWith("_CALL")
-        ? contractChoice === "CALL"
-        : contractChoice === "PUT";
-    const kind = action.endsWith("_CALL") ? "CALL" : action.endsWith("_PUT") ? "PUT" : "BOTH";
-    const hasPosition = kind === "CALL" ? hasOpenCall : kind === "PUT" ? hasOpenPut : hasOpenCall || hasOpenPut;
-    const kinds = kind === "BOTH" ? ["CALL", "PUT"] : [kind];
-    const isEntry = action.startsWith("SELL_");
-    const activeKinds = isEntry
-      ? kinds
-      : kinds.filter((legKind) =>
-          legKind === "CALL" ? hasOpenCall : hasOpenPut,
-        );
+    if (action === "OPEN_STRADDLE") {
+      const quotesReady = ["call", "put"].every((kind) =>
+        Boolean(selected?.[kind] && selected?.[`${kind}_bid`] && selected?.[`${kind}_ask`]),
+      );
+      const tradable = selected?.call_trading_status === "TRADING"
+        && selected?.put_trading_status === "TRADING";
+      button.disabled = !entryReady || !quotesReady || !tradable
+        || hasOpenExposure || hasPendingOrder;
+      continue;
+    }
+
+    const kinds = action === "CLOSE_BOTH"
+      ? ["CALL", "PUT"]
+      : [action.endsWith("_CALL") ? "CALL" : "PUT"];
+    const activeKinds = kinds.filter((kind) =>
+      kind === "CALL" ? hasOpenCall : hasOpenPut,
+    );
     const quotesReady = activeKinds.every((legKind) => {
       const leg = legKind.toLowerCase();
-      return isEntry
-        ? Boolean(selected?.[`${leg}_bid`] && selected?.[`${leg}_ask`])
-        : Boolean(selected?.[`${leg}_ask`]);
+      return Boolean(selected?.[`${leg}_ask`]);
     });
     const tradable = activeKinds.every((legKind) => {
       const status = selected?.[`${legKind.toLowerCase()}_trading_status`];
       return status !== "NOT_TRADING";
     });
-    const entryHasExposure = isEntry && kinds.some((legKind) =>
-      legKind === "CALL" ? hasOpenCall : hasOpenPut,
-    );
     button.disabled = !entryReady
-      || !correctChoice
+      || activeKinds.length === 0
+      || activeKinds.some((kind) =>
+        selected?.[kind.toLowerCase()] !== snapshot?.positions.items.find(
+          (item) => item.option_type === kind && Number(item.remaining_quantity) > 0,
+        )?.instrument,
+      )
       || !quotesReady
-      || !tradable
-      || entryHasExposure
-      || (!isEntry && !hasPosition);
+      || !tradable;
   }
   $("trade-quantity").disabled = !entryReady;
   $("trade-order-type").disabled = !entryReady;
@@ -217,19 +221,25 @@ function updateTradingControls() {
       || selected?.[`${kind}_trading_status`] === "NOT_TRADING";
   });
   const orderType = $("trade-order-type").value;
-  const choice = $("trade-contract").value;
-  $("call-price-field").hidden = orderType !== "LIMIT" || choice === "PUT";
-  $("put-price-field").hidden = orderType !== "LIMIT" || choice === "CALL";
+  $("call-price-field").hidden = orderType !== "LIMIT";
+  $("put-price-field").hidden = orderType !== "LIMIT";
 }
 
 function showSnapshot(data) {
   latestSnapshot = data;
   document.querySelector("main").classList.remove("data-stale-view");
   const { status, market, instruments, contracts, positions, orders, trades, pnl, config } = data;
-  $("connection-indicator").className = `indicator ${status.engine_active ? "indicator-on" : "indicator-off"}`;
-  $("connection-label").textContent = status.engine_active ? "Trading engine active" : "Trading engine inactive";
-  $("notice").textContent = status.error || status.message || "Engine state is available.";
-  $("notice").classList.toggle("notice-error", Boolean(status.error) || !status.connected);
+  $("connection-indicator").className = `indicator ${status.data_connected && status.execution_connected ? "indicator-on" : "indicator-off"}`;
+  $("connection-label").textContent = `${status.data_connected ? "Data connected" : "Data disconnected"} · ${status.execution_connected ? "Execution connected" : "Execution disconnected"}`;
+  $("notice").textContent = [
+    status.error,
+    status.strategy_message,
+    status.message,
+  ].filter(Boolean).join(" ");
+  $("notice").classList.toggle(
+    "notice-error",
+    Boolean(status.error || status.strategy_message) || !status.connected,
+  );
   setBadge($("strategy-status"), status.status);
   setBadge(
     $("market-data-status"),
@@ -390,11 +400,11 @@ async function changeContractSelection(autoAtm) {
 }
 
 function orderDescription(action, selected, positions, orderType, limitPrices) {
-  let kinds = action.endsWith("BOTH")
+  const isEntry = action === "OPEN_STRADDLE";
+  let kinds = isEntry || action === "CLOSE_BOTH"
     ? ["CALL", "PUT"]
     : [action.endsWith("CALL") ? "CALL" : "PUT"];
-  const isEntry = action.startsWith("SELL_");
-  if (!isEntry && action.endsWith("BOTH")) {
+  if (!isEntry && action === "CLOSE_BOTH") {
     kinds = kinds.filter((kind) =>
       positions.some((item) => item.option_type === kind && Number(item.remaining_quantity) > 0),
     );
@@ -436,13 +446,13 @@ async function submitManualOrder(action) {
   const payload = {
     action,
     order_type: orderType,
-    quantity: action.startsWith("SELL_") ? $("trade-quantity").value : null,
+    quantity: action === "OPEN_STRADDLE" ? $("trade-quantity").value : null,
     limit_price_call: orderType === "LIMIT" ? limitPrices.CALL : null,
     limit_price_put: orderType === "LIMIT" ? limitPrices.PUT : null,
   };
   try {
     const result = await postJSON("/api/trading/order", payload);
-    $("trade-message").textContent = `Engine accepted ${result.orders.map((item) => item.instrument).join(", ")} for submission. Confirm fills and order status in Order History.`;
+    $("trade-message").textContent = `Engine accepted ${result.orders.map((item) => item.instrument).join(", ")} for submission. This is not a fill confirmation; check Order History and Open Positions.`;
     await refresh();
   } catch (error) {
     $("trade-message").textContent = `${error.message} Do not retry until you check Order History.`;
@@ -457,7 +467,6 @@ async function submitManualOrder(action) {
 $("contract-expiry").addEventListener("change", () => changeContractSelection(true));
 $("contract-strike").addEventListener("change", () => changeContractSelection(false));
 $("auto-atm").addEventListener("click", () => changeContractSelection(true));
-$("trade-contract").addEventListener("change", updateTradingControls);
 $("trade-order-type").addEventListener("change", updateTradingControls);
 document.querySelectorAll(".trade-action").forEach((button) => {
   button.addEventListener("click", () => submitManualOrder(button.dataset.action));
@@ -465,9 +474,6 @@ document.querySelectorAll(".trade-action").forEach((button) => {
 $("positions-table").addEventListener("click", (event) => {
   const button = event.target.closest("[data-close-action]");
   if (button) {
-    $("trade-contract").value = button.dataset.closeAction.endsWith("_CALL")
-      ? "CALL"
-      : "PUT";
     updateTradingControls();
     submitManualOrder(button.dataset.closeAction);
   }

@@ -97,12 +97,11 @@ class StraddleStrategy(Strategy):
         self._manual_exit_orders: set[str] = set()
         self._manual_exit_batch_active = False
         self._entry_expected_kinds: set[str] = set()
-        self._manual_entry_batch = False
+        self._order_timestamps: dict[str, str] = {}
         self._closed_realized_pnl = Decimal(0)
         self._closed_trade_count = 0
         self._entry_started = False
         self._exit_reason: str | None = None
-        self._emergency_exit = False
         self._submission_uncertain = False
         self._btc_reference_price: Decimal | None = None
         self._btc_reference_timestamp_ns: int | None = None
@@ -118,8 +117,6 @@ class StraddleStrategy(Strategy):
 
     def on_start(self) -> None:
         self._runtime_state.update(
-            connected=True,
-            connection_message="Connected to Bybit Demo",
             engine_error=None,
         )
         self.clock.set_timer(
@@ -128,7 +125,7 @@ class StraddleStrategy(Strategy):
             callback=self._process_engine_commands,
             fire_immediately=True,
         )
-        logger.info("Connected to Bybit Demo")
+        logger.info("Bybit Demo strategy started")
         self._btc_options = [
             instrument
             for instrument in self.cache.instruments(venue=BYBIT_VENUE)
@@ -177,6 +174,8 @@ class StraddleStrategy(Strategy):
         logger.info("Bybit Demo strategy stopped")
         self._runtime_state.update(
             connected=False,
+            data_connected=False,
+            execution_connected=False,
             connection_message="Trading engine stopped",
         )
         self._publish()
@@ -388,8 +387,8 @@ class StraddleStrategy(Strategy):
         logger.info("Position closed on Bybit: %s", event.instrument_id)
         self._finish_exit_if_flat()
         self._finish_manual_exit_batch()
-        if self._exit_reason is None and not self._has_confirmed_open_exposure():
-            self._set_status("FLAT")
+        if self._exit_reason is None:
+            self._set_status(self._open_exposure_status())
         if not self._manual_exit_batch_active and not self._manual_exit_orders:
             self._evaluate_risk()
         self._publish()
@@ -726,7 +725,6 @@ class StraddleStrategy(Strategy):
         self._selected_strike = Decimal(str(call.strike_price))
         self._entry_started = False
         self._entry_expected_kinds.clear()
-        self._manual_entry_batch = False
         self._subscribe_quote(call)
         self._subscribe_quote(put)
         self._subscribe_status(call)
@@ -791,7 +789,6 @@ class StraddleStrategy(Strategy):
         if current_ids != pair_ids or self._exit_reason is not None:
             self._install_selected_pair(pair)
             self._exit_reason = None
-            self._emergency_exit = False
             self._set_status("INSTRUMENTS_SELECTED")
             self._runtime_state.update(
                 connection_message="Selected contracts; waiting for fresh option quotes",
@@ -854,8 +851,9 @@ class StraddleStrategy(Strategy):
             raise RuntimeError("Bybit Demo credentials are not configured")
         if self._settings.strategy_enabled:
             raise RuntimeError("Manual orders are unavailable while automatic entry is enabled")
-        if not self._runtime_state.snapshot()["connected"]:
-            raise RuntimeError("The Bybit Demo execution engine is disconnected")
+        connection = self._runtime_state.snapshot()
+        if not connection["data_connected"] or not connection["execution_connected"]:
+            raise RuntimeError("Bybit Demo data and execution engines must both be connected")
         if self._submission_uncertain or self._exit_reason is not None:
             raise RuntimeError("Trading is paused until existing engine state is resolved")
         if self._has_open_orders():
@@ -870,15 +868,15 @@ class StraddleStrategy(Strategy):
         if order_type == "LIMIT" and not isinstance(payload.get("limit_prices"), dict):
             raise ValueError("Limit prices are required for limit orders")
 
-        if action in {"SELL_CALL", "CLOSE_CALL"}:
-            kinds = ("CALL",)
-        elif action in {"SELL_PUT", "CLOSE_PUT"}:
-            kinds = ("PUT",)
-        elif action in {"SELL_BOTH", "CLOSE_BOTH"}:
+        if action in {"OPEN_STRADDLE", "CLOSE_BOTH"}:
             kinds = ("CALL", "PUT")
+        elif action == "CLOSE_CALL":
+            kinds = ("CALL",)
+        elif action == "CLOSE_PUT":
+            kinds = ("PUT",)
         else:
             raise ValueError("Unsupported manual trading action")
-        is_entry = action.startswith("SELL_")
+        is_entry = action == "OPEN_STRADDLE"
         legs = [self._legs.get(kind) for kind in kinds]
         if any(leg is None for leg in legs):
             raise ValueError("Selected option contracts are not available")
@@ -889,8 +887,16 @@ class StraddleStrategy(Strategy):
             ]
             if not selected_legs:
                 raise ValueError("No open short Call or Put positions are available to close")
+        if is_entry and len(selected_legs) != 2:
+            raise ValueError("Open Short Straddle requires both Call and Put contracts")
         if len(selected_legs) == 2 and (
-            selected_legs[0].instrument.expiration_ns
+            selected_legs[0].kind != "CALL"
+            or selected_legs[1].kind != "PUT"
+            or selected_legs[0].instrument.option_kind != OptionKind.CALL
+            or selected_legs[1].instrument.option_kind != OptionKind.PUT
+            or selected_legs[0].instrument.underlying.code != "BTC"
+            or selected_legs[1].instrument.underlying.code != "BTC"
+            or selected_legs[0].instrument.expiration_ns
             != selected_legs[1].instrument.expiration_ns
             or selected_legs[0].instrument.strike_price
             != selected_legs[1].instrument.strike_price
@@ -899,7 +905,7 @@ class StraddleStrategy(Strategy):
             or selected_legs[0].instrument.settlement_currency
             != selected_legs[1].instrument.settlement_currency
         ):
-            raise ValueError("Sell Both/Close Both requires a matching Call/Put pair")
+            raise ValueError("Open Short Straddle/Close Both requires a matching Call/Put pair")
 
         prices = payload.get("limit_prices") or {}
         order_details = []
@@ -908,14 +914,11 @@ class StraddleStrategy(Strategy):
             instrument = leg.instrument
             if instrument.expiration_ns <= time.time_ns():
                 raise ValueError(f"{instrument.id} has expired")
-            status = self.cache.instrument_status(instrument.id)
-            known_trading_status = (
-                self._instrument_trading_status.get(str(instrument.id))
-                if status is None
-                else status.is_trading
-            )
-            if known_trading_status is False:
-                raise ValueError(f"{instrument.id} is not currently tradable")
+            if is_entry and not self._instrument_is_tradable(instrument):
+                raise ValueError(
+                    f"{instrument.id} has no confirmed tradable status; "
+                    "entry requires a confirmed TRADING status",
+                )
             if not self._quote_is_fresh(leg):
                 raise ValueError(f"A fresh quote is unavailable for {instrument.id}")
 
@@ -978,19 +981,18 @@ class StraddleStrategy(Strategy):
             )
 
         if is_entry:
-            if action == "SELL_BOTH" and any(
+            if any(
                 self._open_quantity(leg) > 0 for leg in selected_legs
             ):
-                raise ValueError("Sell Both requires both selected legs to be flat")
+                raise ValueError("Open Short Straddle requires both selected legs to be flat")
             for leg in selected_legs:
                 self._prepare_leg_for_entry(leg, quantities[leg.kind])
             self._entry_started = True
             self._entry_expected_kinds = set(kinds)
-            self._manual_entry_batch = True
             self._set_status("MANUAL_ENTRY_PENDING")
-            for leg in selected_legs:
+            for index, leg in enumerate(selected_legs):
                 try:
-                    self._submit_order(
+                    submitted = self._submit_order(
                         leg=leg,
                         action="ENTRY",
                         side=OrderSide.SELL,
@@ -1009,8 +1011,30 @@ class StraddleStrategy(Strategy):
                     leg.entry_status = "SUBMISSION_FAILED"
                     raise
                 if self._submission_uncertain:
+                    self._mark_entry_legs_not_submitted(selected_legs[index + 1 :])
+                    break
+                if not submitted:
+                    self._mark_entry_legs_not_submitted(selected_legs[index + 1 :])
                     break
             self._finish_entry_if_terminal()
+            if self._submission_uncertain:
+                self._publish()
+                raise RuntimeError(
+                    "Order submission outcome is uncertain; check Order History "
+                    "and reconcile exchange state before retrying",
+                )
+            failed_entries = [
+                leg for leg in selected_legs if leg.entry_status == "SUBMISSION_FAILED"
+            ]
+            if failed_entries:
+                self._publish()
+                failed_instruments = ", ".join(
+                    str(leg.instrument.id) for leg in failed_entries
+                )
+                raise RuntimeError(
+                    f"Entry submission failed locally for {failed_instruments}; "
+                    "check Order History for any other submitted leg before retrying",
+                )
         else:
             if self._exit_reason is not None:
                 raise RuntimeError("An automatic risk exit is already active")
@@ -1039,25 +1063,25 @@ class StraddleStrategy(Strategy):
         self._publish()
         return {"orders": order_details, "environment": "Demo"}
 
+    @staticmethod
+    def _mark_entry_legs_not_submitted(legs: list[LegState]) -> None:
+        for leg in legs:
+            leg.entry_terminal = True
+            leg.entry_status = "NOT_SUBMITTED"
+
     def _prepare_leg_for_entry(self, leg: LegState, quantity: Decimal) -> None:
         if leg.filled_quantity > 0 and self._open_quantity(leg) == 0:
             self._archive_closed_leg(leg)
-            fresh_leg = LegState(
-                instrument=leg.instrument,
-                kind=leg.kind,
-                requested_quantity=quantity,
-                bid_price=leg.bid_price,
-                ask_price=leg.ask_price,
-                bid_size=leg.bid_size,
-                ask_size=leg.ask_size,
-                quote_timestamp_ns=leg.quote_timestamp_ns,
-            )
-            self._legs[leg.kind] = fresh_leg
-        else:
-            leg.requested_quantity = quantity
-            leg.entry_terminal = False
-            leg.entry_status = "NOT_SUBMITTED"
-            leg.actual_position_quantity = None
+            leg.filled_quantity = Decimal(0)
+            leg.exited_quantity = Decimal(0)
+            leg.entry_notional = Decimal(0)
+            leg.exit_notional = Decimal(0)
+            leg.exit_attempts = 0
+        leg.requested_quantity = quantity
+        leg.entry_terminal = False
+        leg.entry_status = "NOT_SUBMITTED"
+        leg.exit_status = "NOT_SUBMITTED"
+        leg.actual_position_quantity = None
 
     def _quantity_is_valid(
         self,
@@ -1104,7 +1128,22 @@ class StraddleStrategy(Strategy):
             for leg in self._legs.values()
         )
 
+    def _open_exposure_status(self) -> str:
+        open_legs = [
+            leg for leg in self._legs.values() if self._open_quantity(leg) > 0
+        ]
+        if not open_legs:
+            return "FLAT"
+        if len(open_legs) == 2 and all(
+            self._open_quantity(leg) == leg.requested_quantity
+            for leg in open_legs
+        ):
+            return "OPEN"
+        return "PARTIALLY_OPEN"
+
     def _has_open_orders(self) -> bool:
+        if self._order_context:
+            return True
         for order in self.cache.orders_open(venue=BYBIT_VENUE):
             instrument = self.cache.instrument(order.instrument_id)
             if isinstance(instrument, CryptoOption) and instrument.underlying.code == "BTC":
@@ -1136,23 +1175,26 @@ class StraddleStrategy(Strategy):
         ):
             return
         self._manual_exit_batch_active = False
-        self._set_status(
-            "OPEN" if self._has_confirmed_open_exposure() else "FLAT",
-        )
+        self._set_status(self._open_exposure_status())
 
     def _submit_entry_if_ready(self) -> None:
         if self._entry_started or set(self._legs) != {"CALL", "PUT"}:
             return
         if self._btc_reference_price is None or not self._reference_is_fresh():
             return
+        if any(
+            not self._instrument_is_tradable(leg.instrument)
+            for leg in self._legs.values()
+        ):
+            return
         if any(not self._entry_quote_is_usable(leg) for leg in self._legs.values()):
             return
 
         self._entry_started = True
         self._entry_expected_kinds = set(self._legs)
-        self._manual_entry_batch = False
         self._set_status("ENTRY_PENDING")
-        for kind, leg in self._legs.items():
+        legs = list(self._legs.items())
+        for index, (kind, leg) in enumerate(legs):
             if not self._quantity_is_valid(
                 leg.instrument,
                 leg.requested_quantity,
@@ -1161,8 +1203,11 @@ class StraddleStrategy(Strategy):
                     kind,
                     f"Requested quantity is invalid for {leg.instrument.id}",
                 )
-                continue
-            self._submit_limit_order(
+                self._mark_entry_legs_not_submitted(
+                    [item for _, item in legs[index + 1 :]],
+                )
+                break
+            submitted = self._submit_limit_order(
                 leg=leg,
                 action="ENTRY",
                 side=OrderSide.SELL,
@@ -1171,6 +1216,14 @@ class StraddleStrategy(Strategy):
                 reduce_only=False,
             )
             if self._submission_uncertain:
+                self._mark_entry_legs_not_submitted(
+                    [item for _, item in legs[index + 1 :]],
+                )
+                break
+            if not submitted:
+                self._mark_entry_legs_not_submitted(
+                    [item for _, item in legs[index + 1 :]],
+                )
                 break
         self._finish_entry_if_terminal()
 
@@ -1182,8 +1235,8 @@ class StraddleStrategy(Strategy):
         quantity: Decimal,
         price: Decimal | None,
         reduce_only: bool,
-    ) -> None:
-        self._submit_order(
+    ) -> bool:
+        return self._submit_order(
             leg=leg,
             action=action,
             side=side,
@@ -1204,7 +1257,7 @@ class StraddleStrategy(Strategy):
         price: Decimal | None,
         reduce_only: bool,
         manual: bool,
-    ) -> None:
+    ) -> bool:
         order_type = order_type.upper()
         if quantity <= 0:
             reason = "Order quantity must be greater than zero"
@@ -1212,14 +1265,14 @@ class StraddleStrategy(Strategy):
                 self._entry_submission_failed(leg.kind, reason)
             else:
                 self._exit_submission_failed(leg, reason)
-            return
+            return False
         if order_type == "LIMIT" and (price is None or price <= 0):
             reason = "Missing valid limit price or quantity"
             if action == "ENTRY":
                 self._entry_submission_failed(leg.kind, reason)
             else:
                 self._exit_submission_failed(leg, reason)
-            return
+            return False
 
         try:
             if order_type == "MARKET":
@@ -1257,9 +1310,13 @@ class StraddleStrategy(Strategy):
                 if not manual:
                     leg.exit_attempts += 1
                 self._exit_submission_failed(leg, str(exc))
-            return
+            return False
 
         order_id = str(order.client_order_id)
+        self._order_timestamps.setdefault(
+            order_id,
+            datetime.now(timezone.utc).isoformat(),
+        )
         self._order_context[order_id] = (leg.kind, action)
         self._order_requested_quantities[order_id] = quantity
         self._order_fills[order_id] = (Decimal(0), Decimal(0))
@@ -1311,6 +1368,8 @@ class StraddleStrategy(Strategy):
                     "automatic orders are halted until exchange state is reconciled"
                 ),
             )
+            return False
+        return True
 
     def _entry_submission_failed(self, leg_name: str, reason: str) -> None:
         leg = self._legs[leg_name]
@@ -1337,27 +1396,31 @@ class StraddleStrategy(Strategy):
         if all(leg.filled_quantity == 0 for leg in expected_legs):
             self._set_status("ENTRY_FAILED")
             self._entry_expected_kinds.clear()
-            self._manual_entry_batch = False
             return
 
-        quantities = {
-            leg.filled_quantity for leg in expected_legs
-        }
-        if len(expected_legs) == 2 and len(quantities) != 1:
-            reason = (
-                "UNBALANCED_MANUAL_ENTRY"
-                if self._manual_entry_batch
-                else "UNBALANCED_ENTRY"
+        fully_filled_straddle = (
+            len(expected_legs) == 2
+            and all(
+                leg.filled_quantity == leg.requested_quantity
+                for leg in expected_legs
             )
-            self._entry_expected_kinds.clear()
-            self._manual_entry_batch = False
-            self._begin_exit(reason, emergency=True)
-            return
-
-        self._set_status("OPEN" if self._has_open_exposure() else "FLAT")
-        logger.info("Entry batch completed with actual fills")
+        )
+        if fully_filled_straddle:
+            self._set_status("OPEN")
+            logger.info("Both straddle legs reached their requested fill quantities")
+        else:
+            self._set_status("PARTIALLY_OPEN")
+            logger.error(
+                "Straddle entry incomplete; actual fills: %s",
+                {
+                    leg.kind: (
+                        str(leg.filled_quantity),
+                        str(leg.requested_quantity),
+                    )
+                    for leg in expected_legs
+                },
+            )
         self._entry_expected_kinds.clear()
-        self._manual_entry_batch = False
         self._evaluate_risk()
 
     def _handle_order_terminal(
@@ -1428,13 +1491,13 @@ class StraddleStrategy(Strategy):
         self._order_requested_quantities.pop(order_key, None)
         self._order_fills.pop(order_key, None)
         self._order_types.pop(order_key, None)
+        self._order_timestamps.pop(order_key, None)
 
-    def _begin_exit(self, reason: str, emergency: bool = False) -> None:
+    def _begin_exit(self, reason: str) -> None:
         if self._submission_uncertain:
             return
         if self._exit_reason is None:
             self._exit_reason = reason
-            self._emergency_exit = emergency
             self._set_status("EXIT_PENDING")
             logger.warning("Exit triggered: %s", reason)
         self._submit_exits_if_ready()
@@ -1454,7 +1517,7 @@ class StraddleStrategy(Strategy):
         if not open_legs:
             self._finish_exit_if_flat()
             return
-        if not self._emergency_exit and any(
+        if any(
             not self._exit_quote_is_usable(leg) for leg in open_legs
         ):
             return
@@ -1548,6 +1611,18 @@ class StraddleStrategy(Strategy):
         age_ns = time.time_ns() - leg.quote_timestamp_ns
         return -_MAX_QUOTE_AGE_NS <= age_ns <= _MAX_QUOTE_AGE_NS
 
+    def _instrument_is_tradable(self, instrument: CryptoOption) -> bool:
+        return self._known_instrument_trading_status(instrument) is True
+
+    def _known_instrument_trading_status(
+        self,
+        instrument: CryptoOption,
+    ) -> bool | None:
+        status = self.cache.instrument_status(instrument.id)
+        if status is not None:
+            return status.is_trading
+        return self._instrument_trading_status.get(str(instrument.id))
+
     def _entry_quote_is_usable(self, leg: LegState) -> bool:
         return (
             self._quote_is_fresh(leg)
@@ -1624,11 +1699,16 @@ class StraddleStrategy(Strategy):
             if filled == 0 or multiplier == 0
             else str(notional / (filled * multiplier))
         )
+        updated_at = datetime.now(timezone.utc).isoformat()
         self._runtime_state.upsert(
             "orders",
             "client_order_id",
             {
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": self._order_timestamps.setdefault(
+                    order_key,
+                    updated_at,
+                ),
+                "updated_at": updated_at,
                 "client_order_id": order_key,
                 "instrument": str(leg.instrument.id),
                 "option_type": leg.kind,
@@ -1727,18 +1807,8 @@ class StraddleStrategy(Strategy):
                     ),
                     "quote_currency": leg.instrument.quote_currency.code,
                     "multiplier": str(leg.multiplier),
-                    "trading_status": (
-                        "TRADING"
-                        if self._instrument_trading_status.get(
-                            str(leg.instrument.id),
-                        )
-                        is True
-                        else "NOT_TRADING"
-                        if self._instrument_trading_status.get(
-                            str(leg.instrument.id),
-                        )
-                        is False
-                        else "UNKNOWN"
+                    "trading_status": self._status_label(
+                        self._known_instrument_trading_status(leg.instrument),
                     ),
                 }
             )
@@ -1812,19 +1882,11 @@ class StraddleStrategy(Strategy):
                     if self._quote_is_fresh(put_leg)
                     else None
                 ),
-                "call_trading_status": (
-                    "TRADING"
-                    if self._instrument_trading_status.get(str(call.id)) is True
-                    else "NOT_TRADING"
-                    if self._instrument_trading_status.get(str(call.id)) is False
-                    else "UNKNOWN"
+                "call_trading_status": self._status_label(
+                    self._known_instrument_trading_status(call),
                 ),
-                "put_trading_status": (
-                    "TRADING"
-                    if self._instrument_trading_status.get(str(put.id)) is True
-                    else "NOT_TRADING"
-                    if self._instrument_trading_status.get(str(put.id)) is False
-                    else "UNKNOWN"
+                "put_trading_status": self._status_label(
+                    self._known_instrument_trading_status(put),
                 ),
             }
 
@@ -1886,5 +1948,23 @@ class StraddleStrategy(Strategy):
             },
         )
 
+    @staticmethod
+    def _status_label(is_trading: bool | None) -> str:
+        if is_trading is True:
+            return "TRADING"
+        if is_trading is False:
+            return "NOT_TRADING"
+        return "UNKNOWN"
+
     def _set_status(self, status: str) -> None:
         self._strategy_status = status
+        self._runtime_state.update(
+            strategy_status=status,
+            strategy_message=(
+                "Straddle exposure is partial. Review actual quantities in Open "
+                "Positions; recovery orders are not submitted automatically, while "
+                "configured SL/TP monitoring remains active."
+                if status == "PARTIALLY_OPEN"
+                else None
+            ),
+        )

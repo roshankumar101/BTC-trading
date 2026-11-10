@@ -99,9 +99,9 @@ Open `http://127.0.0.1:8000` (or the configured `API_HOST` and `API_PORT`). With
 
 ## Dashboard and API
 
-The dashboard displays live BTC index data, expiry/strike selectors, matching Call/Put symbols and quotes, order states, fills, positions, risk values, and active settings. It refreshes one coherent dashboard snapshot from FastAPI every two seconds and skips a refresh if the previous request is still in flight. Engine activity and BTC reference-data freshness are shown separately; stale BTC prices are withheld and previous dashboard values are visibly marked stale if refresh fails. Mutating selection and order endpoints accept local loopback requests only.
+The dashboard displays live BTC index data, expiry/strike selectors, matching Call/Put symbols and quotes, order states, fills, positions, risk values, and active settings. It refreshes one coherent dashboard snapshot from FastAPI every two seconds and skips a refresh if the previous request is still in flight. Data-client and execution-client connectivity are reported separately from BTC reference-data freshness; stale BTC prices are withheld and previous dashboard values are visibly marked stale if refresh fails. Mutating selection and order endpoints accept local loopback requests only.
 
-Manual trading controls require a fresh BTC reference and selected option quotes. Limit prices are validated against the instrument tick size. Market and limit orders use IOC; limit orders for Both require a separate price for each leg. Closing actions use the engine's remaining position quantity and reduce-only buys. The dashboard asks for confirmation before submitting each action; partial fills and actual position updates determine the resulting status.
+Manual trading controls expose one `Open Short Straddle` action and explicit Call, Put, and Both closing actions. Opening requires fresh BTC and option quotes, confirmed `TRADING` status for both selected instruments, valid quantity, and matching contracts. The Call and Put orders are submitted and tracked independently; the strategy reports `PARTIALLY_OPEN` unless both legs reach their requested fill quantities. It does not automatically submit recovery orders for incomplete entry batches. Limit prices are validated against each instrument's tick size. Market and limit orders use IOC; closing actions use actual remaining position quantities and reduce-only buys. The dashboard asks for confirmation before submission and does not present submission as a fill confirmation.
 
 Available endpoints:
 
@@ -130,10 +130,10 @@ The application does not keep a local database or persist strategy history. Orde
 ## Safety and known limitations
 
 - Bybit Demo only; no live environment is configurable.
-- A straddle is not atomic. A one-leg fill can happen; the strategy attempts a reduce-only buyback using actual filled quantities.
-- `Sell Both` is also non-atomic. If the two IOC legs do not fill equally, the strategy attempts to close actual fills; ambiguous submission state blocks further commands for reconciliation.
+- A straddle is not atomic. A one-leg fill or underfill is reported as `PARTIALLY_OPEN` with the actual exposure displayed; no automatic recovery order is submitted. Existing configured SL/TP risk checks remain active. Use the confirmed close controls to manage the resulting exposure.
+- An uncertain order-submission outcome is reported as an error and pauses further trading until exchange state is reconciled; do not retry based only on the API response.
 - Manual trading controls are local-loopback only and stay unavailable when automatic entries are enabled.
-- The Bybit adapter seeds its private instrument-status cache and emits subscribed status events only when a later poll detects a change. `UNKNOWN` is therefore shown as unknown, not as confirmed trading; only an explicit non-trading status blocks manual actions. Entries still require unexpired instruments and fresh real quotes, but Bybit may reject an order when status is unknown.
+- The Bybit adapter seeds its private instrument-status cache and emits subscribed status events only when a later poll detects a change. `UNKNOWN` is shown as unknown and blocks new entries until a confirmed `TRADING` status is available; this may prevent entry until the adapter reports a status update.
 - Recovery exits use current ask-side quotes and IOC limits. After three confirmed unsuccessful exit attempts, the strategy stops retrying and reports that manual action is required.
 - Software SL/TP is unavailable during process, connection, or data-feed outages; Bybit options do not support the conditional order types needed for native stop orders through this adapter.
 - An unfamiliar startup position or pending order halts trading instead of attempting an unsafe automatic interpretation. An untracked BTC option position event observed after startup also halts trading and requires account-state reconciliation.
@@ -144,4 +144,4 @@ The application does not keep a local database or persist strategy history. Orde
 
 ## Manual testing handoff
 
-No test suite, simulated trade, or order submission was run for this incremental implementation. Before manual order testing, verify the Bybit Demo execution connection, confirm there are no unexpected open BTC option positions or orders, keep `STRATEGY_ENABLED=false`, and inspect the dashboard for fresh BTC and option quotes. Manual actions require separate confirmation. Confirm each actual fill and resulting exchange position in Order History and Open Positions. Risk exits are software managed and are not available during application, connection, or data-feed outages.
+Safe mocked checks can be run with `python -m unittest discover -s tests -v`; these do not start the application or connect to Bybit. No simulated trade or order submission was run for this audit. Before manual Demo testing, verify execution connectivity, confirm there are no unexpected open BTC option positions or orders, keep `STRATEGY_ENABLED=false`, and inspect the dashboard for fresh BTC/option quotes and confirmed `TRADING` status for both legs. Manual actions require separate confirmation. Confirm each actual fill and resulting exchange position in Order History and Open Positions. Risk exits are software managed and are not available during application, connection, or data-feed outages.

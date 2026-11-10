@@ -49,9 +49,12 @@ class RuntimeState:
         self._commands: Queue[EngineCommand] = Queue()
         self._data: dict[str, Any] = {
             "connected": False,
+            "data_connected": False,
+            "execution_connected": False,
             "connection_message": "Waiting for Bybit Demo configuration",
             "engine_error": None,
             "strategy_status": "DISCONNECTED",
+            "strategy_message": None,
             "btc_reference_price": None,
             "btc_reference_timestamp": None,
             "selected_instruments": None,
