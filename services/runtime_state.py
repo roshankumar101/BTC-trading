@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 from copy import deepcopy
 from dataclasses import dataclass, field
 from queue import Empty, Queue
 from threading import Event, Lock
-from typing import Any
+from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -46,6 +49,7 @@ class EngineCommand:
 class RuntimeState:
     def __init__(self) -> None:
         self._lock = Lock()
+        self._listeners: set[Callable[[], None]] = set()
         self._commands: Queue[EngineCommand] = Queue()
         self._data: dict[str, Any] = {
             "connected": False,
@@ -74,14 +78,21 @@ class RuntimeState:
         }
 
     def update(self, **values: Any) -> None:
+        changed = False
         with self._lock:
-            self._data.update(values)
+            for key, value in values.items():
+                if self._data.get(key) != value:
+                    self._data[key] = value
+                    changed = True
+        if changed:
+            self._notify_listeners()
 
     def append(self, key: str, value: Any, limit: int = 500) -> None:
         with self._lock:
             items = list(self._data.get(key, []))
             items.append(value)
             self._data[key] = items[-limit:]
+        self._notify_listeners()
 
     def upsert(
         self,
@@ -90,15 +101,41 @@ class RuntimeState:
         value: dict[str, Any],
         limit: int = 500,
     ) -> None:
+        changed = True
         with self._lock:
             items = list(self._data.get(key, []))
             for index, item in enumerate(items):
                 if item.get(identifier) == value.get(identifier):
+                    if item == value:
+                        changed = False
+                        break
                     items[index] = value
                     self._data[key] = items
-                    return
-            items.append(value)
-            self._data[key] = items[-limit:]
+                    break
+            else:
+                items.append(value)
+                self._data[key] = items[-limit:]
+        if changed:
+            self._notify_listeners()
+
+    def subscribe(self, listener: Callable[[], None]) -> Callable[[], None]:
+        with self._lock:
+            self._listeners.add(listener)
+
+        def unsubscribe() -> None:
+            with self._lock:
+                self._listeners.discard(listener)
+
+        return unsubscribe
+
+    def _notify_listeners(self) -> None:
+        with self._lock:
+            listeners = tuple(self._listeners)
+        for listener in listeners:
+            try:
+                listener()
+            except Exception:
+                logger.exception("Runtime state listener failed")
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:

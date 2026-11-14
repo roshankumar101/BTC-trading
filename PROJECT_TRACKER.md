@@ -2,22 +2,22 @@
 
 ## Current status
 
-The existing Bybit Demo connection and dashboard were preserved. The core functionality audit and approved safety fixes are implemented and covered by safe mocked checks. Live connection, exchange status, reconciliation, and order behavior remain unverified; the application was not started and no order was submitted.
+The existing Bybit Demo connection, dashboard, and native WebSocket updates are preserved. Strategy, instrument selection, order tracking, reconciliation, and risk-management code are present. A custom subclass of the installed official data client now forwards its initially seeded option trading status into NautilusTrader, fixing the identified code-path that could leave instruments permanently `UNKNOWN`. The latest observed Bybit execution error 10002 reports the local request clock about 4.8 seconds ahead; Bybit allows less than one second of future skew, so execution is not ready until the Windows clock is synchronized. This change was not tested; this assistant did not start the application or submit an order.
 
 ## Phase status
 
 | Phase | Status | Notes |
 |---|---|---|
 | 0. Environment and architecture | Complete | Existing Python 3.13 `.venv` retained; stable NautilusTrader 1.231.0 and Windows wheel compatibility confirmed. |
-| 1. Bybit Demo connection and market data | Implemented; runtime unverified | Official Bybit adapter is configured for Demo BTC options; market data subscribes to option quotes and index prices. |
+| 1. Bybit Demo connection and market data | Implemented; execution blocked/unverified | Official adapter is configured for Demo BTC options and subscribes to index/option data. A narrow subclass forwards cached initial instrument statuses. Latest execution authentication failed with timestamp error 10002; system clock synchronization is required. |
 | 2. Instrument selection | Implemented; runtime unverified | Original ATM selector retained; expiry/strike selection and Auto ATM use loaded BTC option instruments, with data subscribed only for the selected pair. |
 | 3. Level 1 strategy | Issue fixed; Demo unverified | One `Open Short Straddle` action independently tracks both legs; `OPEN` requires both requested fill quantities. Incomplete fills are `PARTIALLY_OPEN` with no automatic recovery submission. |
 | 4. Combined risk management | Implemented; runtime unverified | Ask-side buyback, actual position quantities, multipliers, 1% SL / 2% TP, and a guard against overlapping manual/automatic exits. |
-| 5. Restart reconciliation | Implemented; runtime unverified | Nautilus execution reconciliation enabled; exact matching pair can resume, ambiguous startup state fails closed. |
+| 5. Restart reconciliation | Implemented; runtime unverified | Nautilus execution reconciliation is enabled; one or two short positions are represented only if they map to a matching pair and there are no open BTC option orders; ambiguous state fails closed. |
 | 6. FastAPI backend | Issue fixed; runtime unverified | Health and order readiness distinguish NautilusTrader data and execution connection states; uncertain submissions are returned as errors. |
-| 7. Dashboard | Issue fixed; runtime unverified | One Open Short Straddle entry control; retained explicit close controls and separate data/execution connection indicators. |
+| 7. Dashboard and WebSocket | Implemented; not tested in this change | Initial dashboard data is loaded over REST; state changes are pushed through `/ws/dashboard`. REST selection/trading actions remain. No periodic dashboard polling. |
 | 8. Documentation | Complete | README, limitations, and manual handoff included. |
-| 9. Static review | Complete | Python compilation, 11 mocked safety tests, JavaScript syntax, dependency consistency, and diff checks passed; Pylance tooling was unavailable. No runtime or order was started. |
+| 9. Static review | Prior baseline only | Previous Python compilation, 11 mocked safety tests, JavaScript syntax, dependency consistency, and diff checks passed before the latest WebSocket/UI changes. No tests or validation commands were run for those changes. |
 | 10. Call/Put card UI refinement | Complete; statically verified | Reduced only the Call/Put symbol and quote text sizes in scoped CSS; these cards do not render expiry dates, so no date formatting was changed. `node --check` and `git diff --check` passed. |
 | 11. Core functionality audit | Fixes implemented; Demo unverified | Added full-fill gating, no-silent-recovery behavior, confirmed tradability gating, order outcome reporting, and separate connection-state monitoring. |
 
@@ -35,6 +35,7 @@ The existing Bybit Demo connection and dashboard were preserved. The core functi
 - Call and Put orders are tracked independently. Only full requested fills on both legs produce `OPEN`; zero fills produce `ENTRY_FAILED`, and underfilled or asymmetric exposure is reported as `PARTIALLY_OPEN` without automatic recovery orders.
 - Manual closes use actual remaining short position quantities and reduce-only buys.
 - Unknown or non-trading instrument status blocks new entries. The dashboard does not enable entry unless both selected legs are confirmed `TRADING`.
+- A Demo-only subclass of NautilusTrader 1.231.0's official Bybit data client forwards the adapter's seeded `InstrumentStatus` for subscribed contracts, avoiding the adapter's unchanged-status/no-initial-event gap without creating another Bybit connection.
 - Execution-client and market-data-client connection states are sampled separately; API order readiness requires both plus fresh BTC reference data.
 - Uncertain order submissions return an explicit API error and pause further trading for reconciliation instead of returning a success-shaped response.
 - Startup with unresolved BTC option positions or open orders fails closed.
@@ -43,15 +44,15 @@ The existing Bybit Demo connection and dashboard were preserved. The core functi
 - Re-entry after a fully closed position resets the existing leg state in place while preserving the selected instrument and live quote.
 - Risk state and execution history are published through a lock-protected runtime state object.
 - Untracked BTC option positions observed after startup now halt trading for reconciliation instead of being silently ignored.
-- Dashboard refresh uses one atomic snapshot request; engine activity is distinguished from fresh BTC reference data, and stale BTC prices are withheld.
+- Dashboard loads one atomic initial snapshot over REST and receives changed state through native FastAPI/browser WebSockets; engine activity is distinguished from fresh BTC reference data, and stale BTC/option prices are withheld.
 - Order history is bounded to the most recent 500 records, matching the existing execution-history retention; order creation timestamps remain stable across status updates.
 - Date-only and timestamp displays use slightly smaller, consistent typography.
 - Call/Put contract symbols and quote-status lines have a scoped, slight font-size reduction; card structure and dimensions are unchanged.
 
 ## Code-verified versus manual verification
 
-- **Code/static verified:** existing paths were audited; 11 safe mocked tests cover API action validation, full/underfilled/asymmetric entry outcomes, uncertain-command failures, tradability gating, connection-state distinction, re-entry reset, and order timestamps. Python compilation, JavaScript syntax, `pip check`, and `git diff --check` passed. No startup or exchange action was performed.
-- **Requires manual Bybit Demo verification:** connectivity and reconnect behavior, initial instrument-status availability, fresh quotes, contract discovery, exchange reconciliation, order acknowledgements/fills/rejections/cancellations, close controls, and risk exits. No application session or exchange activity was used for these fixes.
+- **Prior code/static verification:** 11 safe mocked tests, Python compilation, JavaScript syntax, `pip check`, and `git diff --check` passed before the latest WebSocket/UI edits. The present WebSocket implementation and latest documentation/UI changes are not tested.
+- **Requires manual Bybit Demo verification:** clock synchronization and execution authentication, reconnect behavior, fresh quotes, contract discovery, exchange reconciliation, order acknowledgements/fills/rejections/cancellations, close controls, and risk exits. The user-provided log showed market-data connectivity but an execution authentication failure; no order was submitted by this assistant.
 
 ## Verified technical decisions
 
@@ -69,7 +70,9 @@ The existing Bybit Demo connection and dashboard were preserved. The core functi
 - Windows 11 is not listed in NautilusTrader's official supported Windows OS table (Windows Server 2022+ is listed).
 - Actual availability, permissions, and liquidity of BTC options in the user's Bybit Demo account have not been checked for this upgrade.
 - The last observed Bybit Demo execution startup reported error 10010 (API key IP allowlist mismatch); verify execution connectivity after restarting with the updated Demo key/IP allowlist.
-- The installed Bybit adapter seeds an internal status cache but emits status events only when a later poll detects a change. Until a trustworthy `TRADING` status is exposed for each option, entries intentionally remain disabled; investigate adapter-supported initial status publication before Demo testing.
+- Initial instrument-status forwarding uses private members of the installed Bybit adapter (`_status_cache` and `_emit_instrument_status`) because its public subscription path does not emit the seeded status. This is scoped to the pinned NautilusTrader 1.231.0 version and must be re-reviewed if the dependency changes. Runtime behavior remains unverified; unknown status still blocks orders.
+- Latest observed Bybit Demo execution error 10002: request timestamp `1794634750905` versus server timestamp `1794634746121` (4,784 ms ahead), while receive window was 5,000 ms. Official Bybit V5 authentication guidance requires `timestamp < server_time + 1000 ms`; widening `recv_window` will not correct this future-clock skew. Synchronize Windows time before a restart. Execution remains disconnected/unverified.
+- `MASTER_BUILD_PROMPT.md` was requested but is not present in the repository root; the current user task and `PROJECT_TRACKER.md` were used as the available requirements.
 - No order or simulated trade has been performed for the incremental features.
 
 ## Important implementation decisions

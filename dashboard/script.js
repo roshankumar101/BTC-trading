@@ -3,7 +3,9 @@ const unavailable = "—";
 let contractSignature = "";
 let latestSnapshot = null;
 let commandPending = false;
-let refreshInProgress = false;
+let dashboardSocket = null;
+let reconnectTimer = null;
+let reconnectDelay = 1000;
 
 function display(value, suffix = "") {
   return value === null || value === undefined || value === ""
@@ -12,7 +14,13 @@ function display(value, suffix = "") {
 }
 
 function setValue(id, value, suffix = "") {
-  $(id).textContent = display(value, suffix);
+  setText($(id), display(value, suffix));
+}
+
+function setText(element, value) {
+  if (element && element.textContent !== value) {
+    element.textContent = value;
+  }
 }
 
 function formatDate(value) {
@@ -22,18 +30,21 @@ function formatDate(value) {
 
 function setBadge(element, value) {
   const status = value || "—";
-  element.textContent = status;
-  element.className = "status-badge";
-  if (/CONNECTED|FILLED|OPEN|CLOSED|SUCCESS|ACKNOWLEDGED|RECOVERED|TRADING|FRESH/i.test(status)) {
-    element.classList.add("status-success");
-  } else if (/FAILED|REJECTED|ERROR|RECONCILIATION_REQUIRED|NOT_TRADING/i.test(status)) {
-    element.classList.add("status-failed");
+  let className = "status-badge";
+  if (/FAILED|REJECTED|ERROR|DISCONNECTED|RECONCILIATION_REQUIRED|NOT_TRADING/i.test(status)) {
+    className += " status-failed";
   } else if (/PENDING|WAITING|PARTIALLY|SUBMITTED|UNKNOWN|STALE/i.test(status)) {
-    element.classList.add("status-pending");
+    className += " status-pending";
+  } else if (/CONNECTED|FILLED|OPEN|CLOSED|SUCCESS|ACKNOWLEDGED|RECOVERED|TRADING|FRESH/i.test(status)) {
+    className += " status-success";
   } else if (/SELECTED|ARMED|TRIGGERED/i.test(status)) {
-    element.classList.add("status-selected");
+    className += " status-selected";
   } else {
-    element.classList.add("status-inactive");
+    className += " status-inactive";
+  }
+  setText(element, status);
+  if (element.className !== className) {
+    element.className = className;
   }
 }
 
@@ -58,6 +69,22 @@ async function postJSON(path, payload) {
 }
 
 function fillTable(body, rows, columns, emptyMessage, addCloseAction = false) {
+  const signature = JSON.stringify([
+    rows,
+    columns,
+    emptyMessage,
+    addCloseAction,
+    addCloseAction
+      ? [
+        commandPending,
+        latestSnapshot?.status.connected,
+        latestSnapshot?.config.strategy_enabled,
+        latestSnapshot?.instruments.selected,
+      ]
+      : null,
+  ]);
+  if (body.dataset.renderSignature === signature) return;
+  body.dataset.renderSignature = signature;
   body.replaceChildren();
   if (!rows.length) {
     const row = document.createElement("tr");
@@ -225,115 +252,110 @@ function updateTradingControls() {
   $("put-price-field").hidden = orderType !== "LIMIT";
 }
 
-function showSnapshot(data) {
-  latestSnapshot = data;
-  document.querySelector("main").classList.remove("data-stale-view");
-  const { status, market, instruments, contracts, positions, orders, trades, pnl, config } = data;
-  $("connection-indicator").className = `indicator ${status.data_connected && status.execution_connected ? "indicator-on" : "indicator-off"}`;
-  $("connection-label").textContent = `${status.data_connected ? "Data connected" : "Data disconnected"} · ${status.execution_connected ? "Execution connected" : "Execution disconnected"}`;
-  $("notice").textContent = [
+function renderConnectionStatus(status) {
+  const dataConnected = Boolean(status.data_connected);
+  const executionConnected = Boolean(status.execution_connected);
+  const indicatorClass = `indicator ${dataConnected && executionConnected ? "indicator-on" : "indicator-off"}`;
+  if ($("connection-indicator").className !== indicatorClass) {
+    $("connection-indicator").className = indicatorClass;
+  }
+  setText(
+    $("connection-label"),
+    `${dataConnected ? "Data connected" : "Data disconnected"} · ${executionConnected ? "Execution connected" : "Execution disconnected"}`,
+  );
+  const noticeText = [
     status.error,
     status.strategy_message,
     status.message,
   ].filter(Boolean).join(" ");
+  setText($("notice"), noticeText);
   $("notice").classList.toggle(
     "notice-error",
     Boolean(status.error || status.strategy_message) || !status.connected,
   );
-  setBadge($("strategy-status"), status.status);
-  setBadge(
-    $("market-data-status"),
-    status.market_data_fresh ? "BTC DATA FRESH" : "BTC DATA STALE / WAITING",
-  );
+  const marketStatus = !status.market_data_fresh
+    ? "BTC DATA STALE / WAITING"
+    : status.option_quotes_fresh
+      ? "BTC & OPTION DATA FRESH"
+      : "BTC DATA FRESH · OPTIONS WAITING";
+  setBadge($("market-data-status"), marketStatus);
+}
 
+function renderStrategyState(status) {
+  setBadge($("strategy-status"), status.status);
+  renderConnectionStatus(status);
+}
+
+function renderMarket(data) {
+  const { market, instruments, contracts } = data;
+  const selected = instruments.selected;
   setValue("btc-price", market.fresh ? market.reference_price : null);
   setValue("watch-btc-price", market.fresh ? market.reference_price : null);
   const referenceTime = market.timestamp
     ? formatDate(market.timestamp)
     : "No exchange update";
-  $("btc-updated").textContent = market.timestamp
-    ? `${market.fresh ? "Updated" : "Last update (stale)"} ${referenceTime}`
-    : referenceTime;
+  setText(
+    $("btc-updated"),
+    market.timestamp
+      ? `${market.fresh ? "Updated" : "Last update (stale)"} ${referenceTime}`
+      : referenceTime,
+  );
   $("btc-updated").classList.toggle("data-stale", !market.fresh && Boolean(market.timestamp));
-  $("watch-btc-time").textContent = market.timestamp
-    ? `${market.fresh ? "Updated" : "Last update (stale)"} ${referenceTime}`
-    : referenceTime;
+  setText(
+    $("watch-btc-time"),
+    market.timestamp
+      ? `${market.fresh ? "Updated" : "Last update (stale)"} ${referenceTime}`
+      : referenceTime,
+  );
   $("watch-btc-time").classList.toggle("data-stale", !market.fresh && Boolean(market.timestamp));
-  setValue("atm-strike", instruments.selected?.strike);
-  $("selected-expiry").textContent = instruments.selected?.expiry
-    ? formatDate(instruments.selected.expiry)
-    : "No contracts selected";
-  updateContractOptions(contracts.items, instruments.selected);
-  setValue("watch-call-symbol", instruments.selected?.call);
-  setValue("watch-put-symbol", instruments.selected?.put);
-  $("watch-call-quote").textContent = `Bid ${display(instruments.selected?.call_bid)} / Ask ${display(instruments.selected?.call_ask)} · ${instruments.selected?.call_trading_status ?? "UNKNOWN"}`;
-  $("watch-put-quote").textContent = `Bid ${display(instruments.selected?.put_bid)} / Ask ${display(instruments.selected?.put_ask)} · ${instruments.selected?.put_trading_status ?? "UNKNOWN"}`;
+  setValue("atm-strike", selected?.strike);
+  setText(
+    $("selected-expiry"),
+    selected?.expiry ? formatDate(selected.expiry) : "No contracts selected",
+  );
+  updateContractOptions(contracts.items, selected);
+  setValue("watch-call-symbol", selected?.call);
+  setValue("watch-put-symbol", selected?.put);
+  setText(
+    $("watch-call-quote"),
+    `Bid ${display(selected?.call_bid)} / Ask ${display(selected?.call_ask)} · ${selected?.call_trading_status ?? "UNKNOWN"}`,
+  );
+  setText(
+    $("watch-put-quote"),
+    `Bid ${display(selected?.put_bid)} / Ask ${display(selected?.put_ask)} · ${selected?.put_trading_status ?? "UNKNOWN"}`,
+  );
   const watchSelection = $("watch-selection");
-  watchSelection.replaceChildren();
-  if (instruments.selected) {
-    const expiryText = document.createElement("span");
-    expiryText.className = "date-display";
-    expiryText.textContent = formatDate(instruments.selected.expiry);
-    watchSelection.append(
-      expiryText,
-      document.createTextNode(` / ${instruments.selected.strike}`),
-    );
-  } else {
-    watchSelection.textContent = unavailable;
+  const selectionText = selected
+    ? `${formatDate(selected.expiry)} / ${selected.strike}`
+    : unavailable;
+  if (watchSelection.dataset.value !== selectionText) {
+    watchSelection.dataset.value = selectionText;
+    watchSelection.replaceChildren();
+    if (selected) {
+      const expiryText = document.createElement("span");
+      expiryText.className = "date-display";
+      expiryText.textContent = formatDate(selected.expiry);
+      watchSelection.append(
+        expiryText,
+        document.createTextNode(` / ${selected.strike}`),
+      );
+    } else {
+      watchSelection.textContent = unavailable;
+    }
   }
-  const quoteTimestamp = instruments.selected?.call_quote_timestamp ?? instruments.selected?.put_quote_timestamp;
-  $("watch-update-time").textContent = quoteTimestamp
-    ? `Last option update ${formatDate(quoteTimestamp)}`
-    : "No option quote update";
+  const quoteTimestamp = selected?.call_quote_timestamp ?? selected?.put_quote_timestamp;
+  setText(
+    $("watch-update-time"),
+    quoteTimestamp
+      ? `Last option update ${formatDate(quoteTimestamp)}`
+      : "No option quote update",
+  );
+}
 
+function renderOrders(orders, trades) {
   const orderFor = (kind) => orders.items.filter((item) => item.option_type === kind).pop();
   setBadge($("call-order-status"), orderFor("CALL")?.status);
   setBadge($("put-order-status"), orderFor("PUT")?.status);
-  $("entry-premium").textContent = display(pnl.combined_entry_premium);
-  $("entry-currency").textContent = pnl.quote_currency
-    ? `Quote currency: ${pnl.quote_currency}`
-    : "Actual filled quantities and multipliers";
-  setValue("buyback-value", pnl.current_buyback_value);
-  setValue("unrealized-pnl", pnl.unrealized_pnl);
-  const hasOpenPosition = positions.items.some((item) => Number(item.remaining_quantity) > 0);
-  setBadge(
-    $("stop-status"),
-    pnl.stop_loss_triggered
-      ? "TRIGGERED"
-      : hasOpenPosition
-        ? `${pnl.stop_loss_percent ?? unavailable}% ARMED`
-        : "INACTIVE",
-  );
-  setBadge(
-    $("take-status"),
-    pnl.take_profit_triggered
-      ? "TRIGGERED"
-      : hasOpenPosition
-        ? `${pnl.take_profit_percent ?? unavailable}% ARMED`
-        : "INACTIVE",
-  );
-
-  fillTable(
-    $("positions-table"),
-    positions.items,
-    [
-      "option_type", "instrument", "strike", "expiry", "requested_quantity",
-      "filled_quantity", "remaining_quantity", "entry_premium", "current_bid",
-      "current_ask", "current_buyback_value", "unrealized_pnl", "position_status",
-    ],
-    "No exchange position data received.",
-    true,
-  );
-  setValue("pnl-call-entry", pnl.call_entry_premium, pnl.quote_currency ? ` ${pnl.quote_currency}` : "");
-  setValue("pnl-put-entry", pnl.put_entry_premium, pnl.quote_currency ? ` ${pnl.quote_currency}` : "");
-  setValue("pnl-entry", pnl.combined_entry_premium, pnl.quote_currency ? ` ${pnl.quote_currency}` : "");
-  setValue("pnl-call-buyback", pnl.call_buyback_value, pnl.quote_currency ? ` ${pnl.quote_currency}` : "");
-  setValue("pnl-put-buyback", pnl.put_buyback_value, pnl.quote_currency ? ` ${pnl.quote_currency}` : "");
-  setValue("pnl-buyback", pnl.current_buyback_value, pnl.quote_currency ? ` ${pnl.quote_currency}` : "");
-  setValue("pnl-unrealized", pnl.unrealized_pnl, pnl.quote_currency ? ` ${pnl.quote_currency}` : "");
-  setValue("pnl-realized", pnl.realized_pnl, pnl.quote_currency ? ` ${pnl.quote_currency}` : "");
-  setValue("exit-reason", pnl.exit_reason);
-
   fillTable(
     $("trades-table"),
     trades.items,
@@ -352,33 +374,256 @@ function showSnapshot(data) {
     ],
     "No order activity received.",
   );
-  $("config-environment").textContent = config.environment;
-  $("config-enabled").textContent = config.strategy_enabled ? "Yes" : "No";
-  $("config-quantity").textContent = config.quantity;
-  $("config-stop").textContent = `${config.stop_loss_percent}%`;
-  $("config-take").textContent = `${config.take_profit_percent}%`;
-  $("last-refresh").textContent = `Updated ${new Date().toLocaleTimeString()}`;
+}
+
+function renderPositions(positions) {
+  fillTable(
+    $("positions-table"),
+    positions.items,
+    [
+      "option_type", "instrument", "strike", "expiry", "requested_quantity",
+      "filled_quantity", "remaining_quantity", "entry_premium", "current_bid",
+      "current_ask", "current_buyback_value", "unrealized_pnl", "position_status",
+    ],
+    "No exchange position data received.",
+    true,
+  );
+}
+
+function renderRisk(pnl, positions) {
+  const quoteCurrency = pnl.quote_currency ? ` ${pnl.quote_currency}` : "";
+  setValue("entry-premium", pnl.combined_entry_premium);
+  setText(
+    $("entry-currency"),
+    pnl.quote_currency
+      ? `Quote currency: ${pnl.quote_currency}`
+      : "Actual filled quantities and multipliers",
+  );
+  setValue("buyback-value", pnl.current_buyback_value);
+  setValue("unrealized-pnl", pnl.unrealized_pnl);
+  const hasOpenPosition = positions.items.some(
+    (item) => Number(item.remaining_quantity) > 0,
+  );
+  setBadge(
+    $("stop-status"),
+    pnl.stop_loss_triggered
+      ? "TRIGGERED"
+      : hasOpenPosition
+        ? `${pnl.stop_loss_percent ?? unavailable}% ARMED`
+        : "INACTIVE",
+  );
+  setBadge(
+    $("take-status"),
+    pnl.take_profit_triggered
+      ? "TRIGGERED"
+      : hasOpenPosition
+        ? `${pnl.take_profit_percent ?? unavailable}% ARMED`
+        : "INACTIVE",
+  );
+  setValue("pnl-call-entry", pnl.call_entry_premium, quoteCurrency);
+  setValue("pnl-put-entry", pnl.put_entry_premium, quoteCurrency);
+  setValue("pnl-entry", pnl.combined_entry_premium, quoteCurrency);
+  setValue("pnl-call-buyback", pnl.call_buyback_value, quoteCurrency);
+  setValue("pnl-put-buyback", pnl.put_buyback_value, quoteCurrency);
+  setValue("pnl-buyback", pnl.current_buyback_value, quoteCurrency);
+  setValue("pnl-unrealized", pnl.unrealized_pnl, quoteCurrency);
+  setValue("pnl-realized", pnl.realized_pnl, quoteCurrency);
+  setValue("exit-reason", pnl.exit_reason);
+}
+
+function renderConfig(config) {
+  setText($("config-environment"), config.environment);
+  setText($("config-enabled"), config.strategy_enabled ? "Yes" : "No");
+  setText($("config-quantity"), config.quantity);
+  setText($("config-stop"), `${config.stop_loss_percent}%`);
+  setText($("config-take"), `${config.take_profit_percent}%`);
+}
+
+function renderSnapshot(data, changedType = "snapshot") {
+  latestSnapshot = data;
+  document.querySelector("main").classList.remove("data-stale-view");
+  if (changedType === "snapshot" || changedType === "connection_status") {
+    renderConnectionStatus(data.status);
+  }
+  if (changedType === "snapshot" || changedType === "strategy_state") {
+    renderStrategyState(data.status);
+  }
+  if (changedType === "snapshot" || changedType === "market_data") {
+    renderMarket(data);
+  }
+  if (changedType === "snapshot" || changedType === "order_update") {
+    renderOrders(data.orders, data.trades);
+  }
+  if (changedType === "snapshot" || changedType === "position_update") {
+    renderPositions(data.positions);
+  }
+  if (
+    changedType === "snapshot"
+    || changedType === "position_update"
+    || changedType === "risk_update"
+  ) {
+    renderRisk(data.pnl, data.positions);
+  }
+  if (changedType === "snapshot") {
+    renderConfig(data.config);
+  }
   updateTradingControls();
 }
 
-async function refresh() {
-  if (refreshInProgress) return;
-  refreshInProgress = true;
+function mergeSection(target, source) {
+  return { ...target, ...source };
+}
+
+function isRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function hasItems(value) {
+  return isRecord(value) && Array.isArray(value.items);
+}
+
+function handleDashboardMessage(message) {
+  if (!message || typeof message !== "object" || typeof message.type !== "string") {
+    console.warn("Ignoring malformed dashboard WebSocket message");
+    return;
+  }
+  if (message.type === "snapshot") {
+    const data = message.data;
+    if (!isRecord(data) || !isRecord(data.status) || !isRecord(data.market)
+      || !isRecord(data.instruments) || !isRecord(data.contracts)
+      || !hasItems(data.contracts) || !hasItems(data.positions)
+      || !hasItems(data.orders) || !hasItems(data.trades)
+      || !isRecord(data.pnl) || !isRecord(data.config)) {
+      console.warn("Ignoring incomplete dashboard snapshot");
+      return;
+    }
+    renderSnapshot(data);
+    return;
+  }
+  if (!latestSnapshot || !message.data || typeof message.data !== "object") {
+    console.warn("Ignoring dashboard update before a valid snapshot");
+    return;
+  }
+
+  const data = message.data;
+  const validUpdate = (() => {
+    if (!isRecord(data)) return false;
+    if (message.type === "connection_status" || message.type === "strategy_state") {
+      return true;
+    }
+    if (message.type === "market_data") {
+      return (!Object.hasOwn(data, "market") || isRecord(data.market))
+        && (!Object.hasOwn(data, "instruments") || isRecord(data.instruments))
+        && (!Object.hasOwn(data, "contracts") || hasItems(data.contracts))
+        && ["market", "instruments", "contracts"].some((key) => Object.hasOwn(data, key));
+    }
+    if (message.type === "order_update") {
+      return ["orders", "trades"].some((key) =>
+        Object.hasOwn(data, key) && hasItems(data[key]),
+      ) && Object.entries(data).every(([key, value]) =>
+        !["orders", "trades"].includes(key) || hasItems(value),
+      );
+    }
+    if (message.type === "position_update") return hasItems(data.positions);
+    if (message.type === "risk_update") return isRecord(data.pnl);
+    return false;
+  })();
+  if (!validUpdate) {
+    console.warn("Ignoring malformed dashboard update");
+    return;
+  }
+
+  let updatedSnapshot = latestSnapshot;
+  if (message.type === "connection_status" || message.type === "strategy_state") {
+    updatedSnapshot = {
+      ...updatedSnapshot,
+      status: mergeSection(updatedSnapshot.status, data),
+    };
+  } else if (message.type === "market_data") {
+    updatedSnapshot = { ...updatedSnapshot };
+    for (const key of ["market", "instruments", "contracts"]) {
+      if (data[key]) updatedSnapshot[key] = data[key];
+    }
+  } else if (message.type === "order_update") {
+    updatedSnapshot = { ...updatedSnapshot };
+    for (const key of ["orders", "trades"]) {
+      if (data[key]) updatedSnapshot[key] = data[key];
+    }
+  } else if (message.type === "position_update") {
+    updatedSnapshot = { ...updatedSnapshot, positions: data.positions };
+  } else if (message.type === "risk_update") {
+    updatedSnapshot = { ...updatedSnapshot, pnl: data.pnl };
+  } else {
+    console.warn(`Ignoring unknown dashboard WebSocket message type: ${message.type}`);
+    return;
+  }
+  renderSnapshot(updatedSnapshot, message.type);
+}
+
+function setLiveConnectionStatus(status) {
+  setText($("last-refresh"), status);
+}
+
+function connectDashboardSocket() {
+  if (
+    dashboardSocket
+    && (dashboardSocket.readyState === WebSocket.CONNECTING
+      || dashboardSocket.readyState === WebSocket.OPEN)
+  ) {
+    return;
+  }
+  if (reconnectTimer !== null) {
+    window.clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+
+  setLiveConnectionStatus("Connecting to live updates…");
+  const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const socket = new WebSocket(`${scheme}//${window.location.host}/ws/dashboard`);
+  dashboardSocket = socket;
+  socket.addEventListener("open", () => {
+    if (dashboardSocket !== socket) return;
+    reconnectDelay = 1000;
+    setLiveConnectionStatus("Live updates connected");
+  });
+  socket.addEventListener("message", (event) => {
+    try {
+      handleDashboardMessage(JSON.parse(event.data));
+    } catch (error) {
+      console.warn("Ignoring invalid dashboard WebSocket message", error);
+    }
+  });
+  socket.addEventListener("error", () => {
+    if (dashboardSocket === socket) {
+      setLiveConnectionStatus("Live updates disconnected");
+    }
+  });
+  socket.addEventListener("close", () => {
+    if (dashboardSocket !== socket) return;
+    dashboardSocket = null;
+    setLiveConnectionStatus("Live updates reconnecting…");
+    reconnectTimer = window.setTimeout(connectDashboardSocket, reconnectDelay);
+    reconnectDelay = Math.min(reconnectDelay * 2, 10000);
+  });
+}
+
+async function loadInitialDashboard() {
   try {
-    showSnapshot(await getJSON("/api/dashboard"));
+    renderSnapshot(await getJSON("/api/dashboard"));
   } catch (error) {
     $("connection-indicator").className = "indicator indicator-off";
-    $("connection-label").textContent = "Status unavailable";
-    $("market-data-status").textContent = "DATA UNAVAILABLE";
-    $("market-data-status").className = "status-badge status-failed";
-    $("notice").textContent = `Dashboard update failed: ${error.message}. Values below are stale and must not be used.`;
+    setText($("connection-label"), "Status unavailable");
+    setBadge($("market-data-status"), "DATA UNAVAILABLE");
+    setText(
+      $("notice"),
+      `Dashboard initial load failed: ${error.message}. Waiting for live snapshot.`,
+    );
     $("notice").classList.add("notice-error");
     document.querySelector("main").classList.add("data-stale-view");
     latestSnapshot = null;
     updateTradingControls();
-  } finally {
-    refreshInProgress = false;
   }
+  connectDashboardSocket();
 }
 
 async function changeContractSelection(autoAtm) {
@@ -392,7 +637,6 @@ async function changeContractSelection(autoAtm) {
     });
     $("trade-message").textContent = "Contract selection updated.";
     $("trade-message").classList.remove("form-message-error");
-    await refresh();
   } catch (error) {
     $("trade-message").textContent = error.message;
     $("trade-message").classList.add("form-message-error");
@@ -453,11 +697,9 @@ async function submitManualOrder(action) {
   try {
     const result = await postJSON("/api/trading/order", payload);
     $("trade-message").textContent = `Engine accepted ${result.orders.map((item) => item.instrument).join(", ")} for submission. This is not a fill confirmation; check Order History and Open Positions.`;
-    await refresh();
   } catch (error) {
     $("trade-message").textContent = `${error.message} Do not retry until you check Order History.`;
     $("trade-message").classList.add("form-message-error");
-    await refresh();
   } finally {
     commandPending = false;
     updateTradingControls();
@@ -479,5 +721,4 @@ $("positions-table").addEventListener("click", (event) => {
   }
 });
 
-refresh();
-window.setInterval(refresh, 2000);
+loadInitialDashboard();

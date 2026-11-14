@@ -8,11 +8,12 @@ from decimal import Decimal
 from pathlib import Path
 from typing import AsyncGenerator, Literal
 
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from config.settings import Settings
+from services.dashboard_websocket import DashboardWebSocketManager
 from services.runtime_state import RuntimeState
 from services.trading_runtime import TradingRuntime
 
@@ -43,12 +44,18 @@ def create_app(
     state: RuntimeState,
     runtime: TradingRuntime,
 ) -> FastAPI:
+    websocket_manager = DashboardWebSocketManager(
+        lambda: _dashboard_snapshot(state, settings),
+    )
+
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
+        websocket_manager.start(state)
         runtime.start()
         try:
             yield
         finally:
+            await websocket_manager.stop()
             runtime.stop()
 
     app = FastAPI(title="BTC Demo Short Straddle", lifespan=lifespan)
@@ -176,45 +183,30 @@ def create_app(
 
     @app.get("/api/dashboard")
     async def dashboard_snapshot() -> dict:
-        snapshot = state.snapshot()
-        market_fresh = _market_data_is_fresh(snapshot)
-        return {
-            "status": {
-                "status": snapshot["strategy_status"],
-                "connected": snapshot["connected"] and market_fresh,
-                "engine_active": snapshot["connected"],
-                "data_connected": snapshot["data_connected"],
-                "execution_connected": snapshot["execution_connected"],
-                "market_data_fresh": market_fresh,
-                "message": _connection_message(snapshot, market_fresh),
-                "strategy_message": snapshot["strategy_message"],
-                "error": snapshot["engine_error"],
-            },
-            "market": {
-                "reference_price": (
-                    snapshot["btc_reference_price"] if market_fresh else None
-                ),
-                "timestamp": snapshot["btc_reference_timestamp"],
-                "fresh": market_fresh,
-            },
-            "instruments": {"selected": snapshot["selected_instruments"]},
-            "contracts": {
-                "items": snapshot["available_contracts"],
-                "selected": snapshot["selected_instruments"],
-            },
-            "positions": {"items": snapshot["positions"]},
-            "orders": {"items": snapshot["orders"]},
-            "trades": {"items": snapshot["trades"]},
-            "pnl": snapshot["pnl"],
-            "config": {
-                "environment": "Demo",
-                "strategy_enabled": settings.strategy_enabled,
-                "quantity": str(settings.straddle_quantity),
-                "stop_loss_percent": str(settings.stop_loss_percent),
-                "take_profit_percent": str(settings.take_profit_percent),
-                "credentials_configured": settings.credentials_configured,
-            },
-        }
+        return _dashboard_snapshot(state, settings)
+
+    @app.websocket("/ws/dashboard")
+    async def dashboard_websocket(websocket: WebSocket) -> None:
+        if not _is_loopback_host(
+            None if websocket.client is None else websocket.client.host,
+        ):
+            await websocket.close(code=1008, reason="Local connections are required")
+            return
+        try:
+            await websocket_manager.connect(websocket)
+            while True:
+                message = await websocket.receive()
+                if message["type"] == "websocket.disconnect":
+                    break
+                await websocket.close(
+                    code=1008,
+                    reason="Dashboard WebSocket is read-only",
+                )
+                break
+        except WebSocketDisconnect:
+            pass
+        finally:
+            websocket_manager.disconnect(websocket)
 
     @app.post("/api/trading/order")
     async def manual_order(
@@ -281,14 +273,17 @@ def create_app(
 
 def _require_local_request(request: Request) -> None:
     client = request.client
-    if client is None:
+    if client is None or not _is_loopback_host(client.host):
         raise HTTPException(status_code=403, detail="Local requests are required")
+
+
+def _is_loopback_host(host: str | None) -> bool:
+    if host is None:
+        return False
     try:
-        is_loopback = ipaddress.ip_address(client.host).is_loopback
+        return ipaddress.ip_address(host).is_loopback
     except ValueError:
-        is_loopback = False
-    if not is_loopback:
-        raise HTTPException(status_code=403, detail="Local requests are required")
+        return False
 
 
 def _require_engine_ready(settings: Settings, state: RuntimeState) -> None:
@@ -354,3 +349,73 @@ def _connection_message(snapshot: dict, market_fresh: bool) -> str:
     if not market_fresh:
         return "BTC market data is unavailable or stale; new orders are paused"
     return snapshot["connection_message"]
+
+
+def _timestamp_is_fresh(timestamp: str | None) -> bool:
+    if not timestamp:
+        return False
+    try:
+        updated_at = datetime.fromisoformat(timestamp)
+    except ValueError:
+        return False
+    age = (datetime.now(timezone.utc) - updated_at).total_seconds()
+    return -10 <= age <= 10
+
+
+def _dashboard_snapshot(state: RuntimeState, settings: Settings) -> dict:
+    snapshot = state.snapshot()
+    market_fresh = _market_data_is_fresh(snapshot)
+    selected = snapshot["selected_instruments"]
+    if selected is not None:
+        selected = dict(selected)
+        for kind in ("call", "put"):
+            quote_fresh = _timestamp_is_fresh(
+                selected.get(f"{kind}_quote_timestamp"),
+            )
+            selected[f"{kind}_quote_fresh"] = quote_fresh
+            if not quote_fresh:
+                selected[f"{kind}_bid"] = None
+                selected[f"{kind}_ask"] = None
+    option_quotes_fresh = bool(
+        selected
+        and selected.get("call_quote_fresh")
+        and selected.get("put_quote_fresh")
+    )
+    return {
+        "status": {
+            "status": snapshot["strategy_status"],
+            "connected": snapshot["connected"] and market_fresh,
+            "engine_active": snapshot["connected"],
+            "data_connected": snapshot["data_connected"],
+            "execution_connected": snapshot["execution_connected"],
+            "market_data_fresh": market_fresh,
+            "option_quotes_fresh": option_quotes_fresh,
+            "message": _connection_message(snapshot, market_fresh),
+            "strategy_message": snapshot["strategy_message"],
+            "error": snapshot["engine_error"],
+        },
+        "market": {
+            "reference_price": (
+                snapshot["btc_reference_price"] if market_fresh else None
+            ),
+            "timestamp": snapshot["btc_reference_timestamp"],
+            "fresh": market_fresh,
+        },
+        "instruments": {"selected": selected},
+        "contracts": {
+            "items": snapshot["available_contracts"],
+            "selected": selected,
+        },
+        "positions": {"items": snapshot["positions"]},
+        "orders": {"items": snapshot["orders"]},
+        "trades": {"items": snapshot["trades"]},
+        "pnl": snapshot["pnl"],
+        "config": {
+            "environment": "Demo",
+            "strategy_enabled": settings.strategy_enabled,
+            "quantity": str(settings.straddle_quantity),
+            "stop_loss_percent": str(settings.stop_loss_percent),
+            "take_profit_percent": str(settings.take_profit_percent),
+            "credentials_configured": settings.credentials_configured,
+        },
+    }

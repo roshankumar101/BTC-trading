@@ -10,7 +10,7 @@ The strategy finds a BTC Call and Put with the same strike, expiry, quote curren
 
 When `STRATEGY_ENABLED=true`, the automatic strategy submits one sell limit IOC order per leg using current bid quotes. Automatic entry remains disabled by default. With automatic entry disabled, the dashboard also provides manually confirmed Demo market or limit IOC orders for one selected Call, Put, or matching pair. All manual requests are validated and submitted by the existing NautilusTrader strategy; the browser never talks to Bybit.
 
-The engine tracks exchange acknowledgements, fills, and position events. An unbalanced two-leg entry triggers reduce-only recovery orders for actual filled exposure. Manual and automatic exits share the same per-leg pending-order guard.
+The engine tracks exchange acknowledgements, fills, and position events. A one-leg or partial entry is reported as incomplete exposure; the application does not silently submit recovery orders. Review the actual positions and use the explicit close controls when recovery is needed. Manual and automatic exits share the same per-leg pending-order guard.
 
 While open, the software monitors the combined value of the remaining short legs using current ask quotes, actual position quantities, and instrument multipliers:
 
@@ -42,7 +42,7 @@ dashboard/
   app.py                   FastAPI state and local manual-command API
   index.html               Dashboard structure
   style.css                Responsive light styling
-  script.js                Periodic API refresh and rendering
+  script.js                Initial REST snapshot, WebSocket updates, and rendering
 services/
   instrument_selector.py   BTC option pair and ATM selection
   risk_manager.py          Combined premium and P&L calculation
@@ -95,11 +95,11 @@ The credential values are never sent to the dashboard or included in application
 python main.py
 ```
 
-Open `http://127.0.0.1:8000` (or the configured `API_HOST` and `API_PORT`). With no Demo credentials, the dashboard still starts but reports that exchange data is unavailable. With credentials configured, the node connects to Bybit Demo even when strategy entry is disabled.
+Open `http://127.0.0.1:8000` (or the configured `API_HOST` and `API_PORT`). With no Demo credentials, the dashboard still starts but reports that exchange data is unavailable. With credentials configured, the node attempts to connect to Bybit Demo even when strategy entry is disabled; connection failures are reported separately for market data and execution.
 
 ## Dashboard and API
 
-The dashboard displays live BTC index data, expiry/strike selectors, matching Call/Put symbols and quotes, order states, fills, positions, risk values, and active settings. It refreshes one coherent dashboard snapshot from FastAPI every two seconds and skips a refresh if the previous request is still in flight. Data-client and execution-client connectivity are reported separately from BTC reference-data freshness; stale BTC prices are withheld and previous dashboard values are visibly marked stale if refresh fails. Mutating selection and order endpoints accept local loopback requests only.
+The dashboard loads one coherent initial snapshot from FastAPI, then receives state changes through the native `/ws/dashboard` WebSocket endpoint. The WebSocket is read-only; selections and trading commands remain REST requests and mutating endpoints accept local loopback requests only. Data-client and execution-client connectivity are reported separately from BTC reference-data freshness, and stale BTC and option quotes are withheld.
 
 Manual trading controls expose one `Open Short Straddle` action and explicit Call, Put, and Both closing actions. Opening requires fresh BTC and option quotes, confirmed `TRADING` status for both selected instruments, valid quantity, and matching contracts. The Call and Put orders are submitted and tracked independently; the strategy reports `PARTIALLY_OPEN` unless both legs reach their requested fill quantities. It does not automatically submit recovery orders for incomplete entry batches. Limit prices are validated against each instrument's tick size. Market and limit orders use IOC; closing actions use actual remaining position quantities and reduce-only buys. The dashboard asks for confirmation before submission and does not present submission as a fill confirmation.
 
@@ -123,7 +123,7 @@ No example market prices, strikes, order fills, or P&L values are fabricated. Em
 
 ## Restart and recovery
 
-NautilusTrader's live execution engine reconciliation is enabled by its default configuration. Before the strategy begins, it checks the exchange-reconciled cache. It resumes risk monitoring only when it finds exactly one matching short Call and Put with no pending BTC option orders. If open orders, unmatched positions, or ambiguous state are found, the strategy fails closed and reports `RECONCILIATION_REQUIRED`; it does not blindly recreate orders.
+NautilusTrader's live execution engine reconciliation is enabled by its default configuration. Before the strategy begins, it checks the exchange-reconciled cache. It resumes risk monitoring only when it finds one or two short BTC option positions that map to a matching Call/Put pair, with no pending BTC option orders. A single-leg position is represented as incomplete exposure. If open orders, unmatched positions, or ambiguous state are found, the strategy fails closed and reports `RECONCILIATION_REQUIRED`; it does not blindly recreate orders.
 
 The application does not keep a local database or persist strategy history. Order and fill history in the dashboard is in-memory, retains up to 500 records per list, and starts empty after restart; active positions are reconciled from Bybit.
 
@@ -133,7 +133,8 @@ The application does not keep a local database or persist strategy history. Orde
 - A straddle is not atomic. A one-leg fill or underfill is reported as `PARTIALLY_OPEN` with the actual exposure displayed; no automatic recovery order is submitted. Existing configured SL/TP risk checks remain active. Use the confirmed close controls to manage the resulting exposure.
 - An uncertain order-submission outcome is reported as an error and pauses further trading until exchange state is reconciled; do not retry based only on the API response.
 - Manual trading controls are local-loopback only and stay unavailable when automatic entries are enabled.
-- The Bybit adapter seeds its private instrument-status cache and emits subscribed status events only when a later poll detects a change. `UNKNOWN` is shown as unknown and blocks new entries until a confirmed `TRADING` status is available; this may prevent entry until the adapter reports a status update.
+- The installed Bybit adapter does not publish its initial instrument-status cache through NautilusTrader. The project’s Demo data-client subclass forwards the adapter’s cached status when the strategy subscribes (and when the cache is seeded after subscription); `UNKNOWN` still blocks entries if the status request fails or has no result. This integration is pinned to the installed NautilusTrader 1.231.0 adapter internals and remains runtime-unverified.
+- Bybit V5 authentication requires the signed request timestamp to be less than server time plus 1,000 ms; a larger `recv_window` does not fix a local clock that is ahead. Keep Windows time synchronized (Settings → Time & language → Date & time → Sync now) before starting. The last reported error 10002 showed a request timestamp about 4.8 seconds ahead of server time.
 - Recovery exits use current ask-side quotes and IOC limits. After three confirmed unsuccessful exit attempts, the strategy stops retrying and reports that manual action is required.
 - Software SL/TP is unavailable during process, connection, or data-feed outages; Bybit options do not support the conditional order types needed for native stop orders through this adapter.
 - An unfamiliar startup position or pending order halts trading instead of attempting an unsafe automatic interpretation. An untracked BTC option position event observed after startup also halts trading and requires account-state reconciliation.
@@ -144,4 +145,4 @@ The application does not keep a local database or persist strategy history. Orde
 
 ## Manual testing handoff
 
-Safe mocked checks can be run with `python -m unittest discover -s tests -v`; these do not start the application or connect to Bybit. No simulated trade or order submission was run for this audit. Before manual Demo testing, verify execution connectivity, confirm there are no unexpected open BTC option positions or orders, keep `STRATEGY_ENABLED=false`, and inspect the dashboard for fresh BTC/option quotes and confirmed `TRADING` status for both legs. Manual actions require separate confirmation. Confirm each actual fill and resulting exchange position in Order History and Open Positions. Risk exits are software managed and are not available during application, connection, or data-feed outages.
+Safe mocked checks can be run with `python -m unittest discover -s tests -v`; these do not start the application or connect to Bybit. No simulated trade or order submission was run for this audit. Before manual Demo testing, synchronize the Windows clock, verify execution connectivity, confirm there are no unexpected open BTC option positions or orders, keep `STRATEGY_ENABLED=false`, and inspect the dashboard for fresh BTC/option quotes and confirmed `TRADING` status for both legs. Manual actions require separate confirmation. Confirm each actual fill and resulting exchange position in Order History and Open Positions. Risk exits are software managed and are not available during application, connection, or data-feed outages.

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from threading import Event, Thread
 
@@ -7,18 +8,93 @@ from nautilus_trader.adapters.bybit import (
     BybitDataClientConfig,
     BybitEnvironment,
     BybitExecClientConfig,
-    BybitLiveDataClientFactory,
     BybitLiveExecClientFactory,
     BybitProductType,
 )
+from nautilus_trader.adapters.bybit.data import BybitDataClient
+from nautilus_trader.adapters.bybit.factories import (
+    get_cached_bybit_http_client,
+    get_cached_bybit_instrument_provider,
+)
+from nautilus_trader.cache.cache import Cache
 from nautilus_trader.common.config import InstrumentProviderConfig
+from nautilus_trader.common.component import LiveClock, MessageBus
+from nautilus_trader.data.messages import SubscribeInstrumentStatus
+from nautilus_trader.live.factories import LiveDataClientFactory
 from nautilus_trader.live.node import TradingNode, TradingNodeConfig
+from nautilus_trader.model.identifiers import InstrumentId
 
 from config.settings import Settings
 from services.runtime_state import RuntimeState
 from strategy.straddle import StraddleStrategy
 
 logger = logging.getLogger(__name__)
+
+
+class _BybitDataClientWithInitialStatus(BybitDataClient):
+    async def _subscribe_instrument_status(
+        self,
+        command: SubscribeInstrumentStatus,
+    ) -> None:
+        await super()._subscribe_instrument_status(command)
+        self._publish_cached_status(command.instrument_id)
+
+    async def _seed_instrument_status_cache(self) -> None:
+        await super()._seed_instrument_status_cache()
+        for instrument_id in self._instrument_status_subs:
+            self._publish_cached_status(instrument_id)
+
+    def _publish_cached_status(self, instrument_id: InstrumentId) -> None:
+        action = self._status_cache.get(instrument_id)
+        if action is not None:
+            self._emit_instrument_status(
+                instrument_id,
+                action,
+                self._clock.timestamp_ns(),
+            )
+
+
+class _BybitDemoDataClientFactory(LiveDataClientFactory):
+    @staticmethod
+    def create(
+        loop: asyncio.AbstractEventLoop,
+        name: str,
+        config: BybitDataClientConfig,
+        msgbus: MessageBus,
+        cache: Cache,
+        clock: LiveClock,
+    ) -> BybitDataClient:
+        if config.environment != BybitEnvironment.DEMO:
+            raise ValueError("The BTC straddle data client is restricted to Bybit Demo")
+
+        product_types = config.product_types or (BybitProductType.OPTION,)
+        client = get_cached_bybit_http_client(
+            environment=BybitEnvironment.DEMO,
+            api_key=config.api_key,
+            api_secret=config.api_secret,
+            base_url=config.base_url_http,
+            timeout_secs=None,
+            max_retries=config.max_retries,
+            retry_delay_ms=config.retry_delay_initial_ms,
+            retry_delay_max_ms=config.retry_delay_max_ms,
+            recv_window_ms=config.recv_window_ms,
+            proxy_url=config.proxy_url,
+        )
+        provider = get_cached_bybit_instrument_provider(
+            client=client,
+            product_types=tuple(product_types),
+            config=config.instrument_provider,
+        )
+        return _BybitDataClientWithInitialStatus(
+            loop=loop,
+            client=client,
+            msgbus=msgbus,
+            cache=cache,
+            clock=clock,
+            instrument_provider=provider,
+            config=config,
+            name=name,
+        )
 
 
 class TradingRuntime:
@@ -68,7 +144,7 @@ class TradingRuntime:
         )
 
         node = TradingNode(config=node_config)
-        node.add_data_client_factory("BYBIT", BybitLiveDataClientFactory)
+        node.add_data_client_factory("BYBIT", _BybitDemoDataClientFactory)
         node.add_exec_client_factory("BYBIT", BybitLiveExecClientFactory)
         node.trader.add_strategy(StraddleStrategy(self._settings, self._state))
         node.build()
